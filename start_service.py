@@ -50,6 +50,8 @@ def start_service():
         env = os.environ.copy()
         host = env.get('BOSS_SERVICE_HOST', '127.0.0.1')
         port = env.get('BOSS_SERVICE_PORT', '5001')
+        cdp_port = env.get('CDP_PORT', '9222')
+        user_data = env.get('BOSSZP_USER_DATA', '/tmp/bosszhipin_profile')
         # 启动前释放端口
         free_port(port)
         # 确保不存在残留的 uvicorn 进程（例如上一次reloader未退出干净）
@@ -59,22 +61,36 @@ def start_service():
         except Exception:
             pass
 
-        # 使用 uvicorn 以可导入字符串方式启动，限定 reload 监听路径（相对路径），排除启动脚本
-        # 注意：uvicorn 要求 --reload-dir 与 --reload-exclude 为相对路径
-        src_dir_rel = "src"
-        root_dir_rel = "."
-        start_file_rel = "start_service.py"
+        # 先启动独立的 Chrome (CDP)，确保浏览器长驻，与 API 进程解耦
+        chrome_cmd = [
+            "google-chrome" if sys.platform != "darwin" else \
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            f"--remote-debugging-port={cdp_port}",
+            f"--user-data-dir={user_data}",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-background-networking",
+            "--disable-dev-shm-usage",
+            "--disable-extensions",
+            "--no-sandbox",
+            # "--disable-setuid-sandbox",
+            "--window-size=1200,800"
+        ]
+        try:
+            # 若已存在，会失败；容错允许
+            subprocess.Popen(chrome_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, preexec_fn=os.setsid)
+            time.sleep(0.8)
+        except Exception:
+            pass
+
+        # 使用 uvicorn 启动（可开启 --reload；CDP模式下重载不会中断浏览器）
         cmd = [
             sys.executable, "-m", "uvicorn",
             "boss_service:app",
             "--host", host,
             "--port", port,
             "--log-level", "info",
-            "--reload",
-            "--reload-dir", src_dir_rel,
-            "--reload-dir", root_dir_rel,
-            "--reload-exclude", start_file_rel,
-            "--reload-delay", "0.3",
+            "--reload"
         ]
         # 新建进程组，以便整体发送信号
         process = subprocess.Popen(cmd, env=env, preexec_fn=os.setsid)
