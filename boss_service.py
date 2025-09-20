@@ -10,7 +10,7 @@ import json
 import threading
 import hashlib
 from datetime import datetime
-from fastapi import FastAPI, Query, Request
+from fastapi import FastAPI, Query, Request, Body
 from fastapi.responses import JSONResponse
 from fastapi.concurrency import run_in_threadpool
 from contextlib import asynccontextmanager
@@ -74,9 +74,6 @@ class BossService:
             self.shutdown_requested = False
             self.startup_complete = threading.Event() # Event to signal startup completion
             self.initialized = True
-            self.file_hashes = {}
-            self.watch_thread = None
-            self.should_watch = True
             self.setup_routes()
             # 事件驱动的消息缓存（来自网络响应）
             self.chat_cache = {}
@@ -244,6 +241,24 @@ class BossService:
                 return JSONResponse({
                     'success': True,
                     'resume': resume,
+                    'timestamp': datetime.now().isoformat()
+                })
+            except Exception as e:
+                return JSONResponse({
+                    'success': False,
+                    'error': str(e),
+                    'timestamp': datetime.now().isoformat()
+                })
+
+        @self.app.post('/resume/request')
+        def request_resume_api(chat_id: str = Body(..., embed=True)):
+            try:
+                result = self.request_resume(chat_id)
+                return JSONResponse({
+                    'success': result.get('success', False),
+                    'chat_id': chat_id,
+                    'already_sent': result.get('already_sent', False),
+                    'details': result.get('details', ''),
                     'timestamp': datetime.now().isoformat()
                 })
             except Exception as e:
@@ -475,8 +490,7 @@ class BossService:
 
             self.add_notification("持久化浏览器会话启动成功！", "success")
             
-            # 启动文件监控
-            self.start_file_watcher()
+            # 文件监控已禁用（使用 uvicorn --reload）
 
         except Exception as e:
             self.add_notification(f"启动持久化浏览器失败: {e}", "error")
@@ -1276,6 +1290,101 @@ class BossService:
         except Exception as e:
             self.add_notification(f"重新创建页面失败: {e}", "error")
             raise Exception(f"重新创建页面失败: {e}")
+
+    def request_resume(self, chat_id: str) -> dict:
+        """对某个对话发送求简历请求。如果已存在“简历请求已发送”，则不重复发送。
+        返回: { success: bool, already_sent: bool, details: str }
+        """
+        with self.lock:
+            # 确保浏览器会话和登录
+            self._ensure_browser_session()
+            if not self.is_logged_in and not self.ensure_login():
+                raise Exception("未登录")
+
+            try:
+                # 确保在聊天页面
+                try:
+                    if settings.CHAT_URL not in self.page.url:
+                        self.page.goto(settings.CHAT_URL, wait_until="domcontentloaded", timeout=3000)
+                except Exception:
+                    pass
+
+                # 选中指定 chat_id 的列表项
+                target = None
+                for sel in ["div.geek-item", "[role='listitem']"]:
+                    try:
+                        items = self.page.locator(sel).all()
+                    except Exception:
+                        items = []
+                    for it in items:
+                        try:
+                            did = it.get_attribute('data-id') or it.get_attribute('id')
+                            if did and chat_id and did == chat_id:
+                                target = it
+                                break
+                        except Exception:
+                            continue
+                    if target:
+                        break
+
+                if not target:
+                    return { 'success': False, 'already_sent': False, 'details': '未找到指定对话项' }
+
+                # 点击打开右侧对话面板
+                try:
+                    target.click()
+                except Exception as e:
+                    return { 'success': False, 'already_sent': False, 'details': f'点击对话失败: {e}' }
+
+                # 检查是否已发送过“简历请求已发送”
+                try:
+                    panel_text = self.page.locator("body").inner_text()
+                    if "简历请求已发送" in panel_text:
+                        return { 'success': True, 'already_sent': True, 'details': '已存在简历请求' }
+                except Exception:
+                    pass
+
+                # 查找“求简历”按钮并点击
+                clicked = False
+                resume_btn_selectors = [
+                    "xpath=//button[contains(., '求简历')]",
+                    "xpath=//a[contains(., '求简历')]",
+                    "text=求简历"
+                ]
+                for bsel in resume_btn_selectors:
+                    try:
+                        btn = self.page.locator(bsel).first
+                        if btn and btn.count() > 0:
+                            btn.click()
+                            clicked = True
+                            break
+                    except Exception:
+                        continue
+
+                if not clicked:
+                    return { 'success': False, 'already_sent': False, 'details': '未找到“求简历”按钮' }
+
+                # 验证是否出现“简历请求已发送”
+                try:
+                    # 用短等待避免长阻塞
+                    self.page.wait_for_function(
+                        "() => document.body.innerText.includes('简历请求已发送')",
+                        timeout=2000
+                    )
+                    return { 'success': True, 'already_sent': False, 'details': '简历请求已发送' }
+                except Exception:
+                    # 再做一次快照检查
+                    try:
+                        panel_text = self.page.locator("body").inner_text()
+                        if "简历请求已发送" in panel_text:
+                            return { 'success': True, 'already_sent': False, 'details': '简历请求已发送' }
+                    except Exception:
+                        pass
+                    return { 'success': False, 'already_sent': False, 'details': '未检测到发送成功提示' }
+
+            except Exception as e:
+                self.add_notification(f"求简历操作失败: {e}", "error")
+                raise
     
     def _graceful_shutdown(self):
         """Gracefully shut down Playwright resources."""
@@ -1302,78 +1411,20 @@ class BossService:
         self.add_notification("Playwright资源已清理", "success")
     
     def start_file_watcher(self):
-        """启动文件监控线程"""
-        if self.watch_thread is None or not self.watch_thread.is_alive():
-            self.watch_thread = threading.Thread(target=self._file_watcher_loop, daemon=True)
-            self.watch_thread.start()
-            self.add_notification("文件监控已启动", "info")
+        """已禁用：使用 uvicorn --reload 实现热重载"""
+        return
     
     def _file_watcher_loop(self):
-        """文件监控循环"""
-        files_to_watch = [
-            # "boss_service.py",  # 排除主服务文件，避免循环重启
-            "src/page_selectors.py",
-            "src/config.py",
-            "src/mappings.py",
-            "src/blacklist.py",
-            "src/export.py"
-        ]
-        
-        while self.should_watch:
-            try:
-                for file_path in files_to_watch:
-                    if os.path.exists(file_path):
-                        current_hash = self._get_file_hash(file_path)
-                        if file_path in self.file_hashes and self.file_hashes[file_path] != current_hash:
-                            self.add_notification(f"检测到文件变化: {file_path}", "info")
-                            self._soft_restart()
-                            break
-                        self.file_hashes[file_path] = current_hash
-                
-                time.sleep(1)  # 每秒检查一次
-            except Exception as e:
-                self.add_notification(f"文件监控错误: {e}", "error")
-                time.sleep(5)
+        """已禁用"""
+        return
     
     def _get_file_hash(self, file_path):
-        """获取文件哈希值"""
-        try:
-            with open(file_path, 'rb') as f:
-                return hashlib.md5(f.read()).hexdigest()
-        except Exception:
-            return None
+        """已禁用"""
+        return None
     
     def _soft_restart(self):
-        """软重启 - 重新加载代码但不关闭浏览器"""
-        try:
-            self.add_notification("执行软重启...", "info")
-            
-            # 重新加载模块
-            import importlib
-            import sys
-            
-            # 重新加载相关模块
-            modules_to_reload = [
-                'src.page_selectors',
-                'src.config', 
-                'src.mappings',
-                'src.blacklist',
-                'src.export'
-            ]
-            
-            for module_name in modules_to_reload:
-                if module_name in sys.modules:
-                    importlib.reload(sys.modules[module_name])
-                    self.add_notification(f"重新加载模块: {module_name}", "info")
-            
-            # 不重新加载主服务文件，避免循环重启
-            # if 'boss_service' in sys.modules:
-            #     importlib.reload(sys.modules['boss_service'])
-            
-            self.add_notification("软重启完成，浏览器会话已保持", "success")
-            
-        except Exception as e:
-            self.add_notification(f"软重启失败: {e}", "error")
+        """已禁用（uvicorn --reload 负责重载）"""
+        return
 
     def _ensure_browser_session(self):
         # Context present?
@@ -1664,66 +1715,63 @@ class BossService:
         except Exception as e:
             self.add_notification(f"保存简历数据失败: {e}", "error")
     
-    def check_code_updates(self):
-        """检查代码更新"""
-        current_hash = self.get_code_hash()
-        if self.last_code_hash and current_hash != self.last_code_hash:
-            # 触发热更新（不重启，不关闭浏览器）
-            try:
-                self.reload_code()
-                self.add_notification("代码已热更新(无需重启)", "success")
-            except Exception as e:
-                self.add_notification(f"热更新失败: {e}", "error")
-            return True
-        self.last_code_hash = current_hash
-        return False
+    # def check_code_updates(self):
+    #     """检查代码更新"""
+    #     current_hash = self.get_code_hash()
+    #     if self.last_code_hash and current_hash != self.last_code_hash:
+    #         # 触发热更新（不重启，不关闭浏览器）
+    #         try:
+    #             self.reload_code()
+    #             self.add_notification("代码已热更新(无需重启)", "success")
+    #         except Exception as e:
+    #             self.add_notification(f"热更新失败: {e}", "error")
+    #         return True
+    #     self.last_code_hash = current_hash
+    #     return False
     
-    def get_code_hash(self):
-        """获取代码文件哈希值"""
-        hash_md5 = hashlib.md5()
-        # 仅监控 src 目录的变更，避免自身文件热更新复杂度
-        for root, dirs, files in os.walk("src"):
-            for file in files:
-                if file.endswith('.py'):
-                    filepath = os.path.join(root, file)
-                    try:
-                        with open(filepath, "rb") as f:
-                            hash_md5.update(f.read())
-                    except:
-                        pass
-        return hash_md5.hexdigest()
+    # def get_code_hash(self):
+    #     """获取代码文件哈希值"""
+    #     hash_md5 = hashlib.md5()
+    #     # 仅监控 src 目录的变更，避免自身文件热更新复杂度
+    #     for root, dirs, files in os.walk("src"):
+    #         for file in files:
+    #             if file.endswith('.py'):
+    #                 filepath = os.path.join(root, file)
+    #                 try:
+    #                     with open(filepath, "rb") as f:
+    #                         hash_md5.update(f.read())
+    #                 except:
+    #                     pass
+    #     return hash_md5.hexdigest()
     
-    def start_monitoring(self):
-        """(已禁用) 启动代码监控"""
-        return
 
-    def reload_code(self):
-        """热更新配置/工具模块，不关闭浏览器和Flask。"""
-        import importlib
-        with self.lock:
-            # 重新加载配置与工具模块
-            try:
-                import src.config as cfg_mod
-                cfg_mod = importlib.reload(cfg_mod)
-                # 更新全局 settings 引用
-                globals()['settings'] = cfg_mod.settings
-                self.add_notification("配置已热更新", "success")
-            except Exception as e:
-                self.add_notification(f"配置热更新失败: {e}", "error")
+    # def reload_code(self):
+    #     """热更新配置/工具模块，不关闭浏览器和Flask。"""
+    #     import importlib
+    #     with self.lock:
+    #         # 重新加载配置与工具模块
+    #         try:
+    #             import src.config as cfg_mod
+    #             cfg_mod = importlib.reload(cfg_mod)
+    #             # 更新全局 settings 引用
+    #             globals()['settings'] = cfg_mod.settings
+    #             self.add_notification("配置已热更新", "success")
+    #         except Exception as e:
+    #             self.add_notification(f"配置热更新失败: {e}", "error")
             
-            try:
-                import src.utils as utils_mod
-                importlib.reload(utils_mod)
-                self.add_notification("工具模块已热更新", "success")
-            except Exception as e:
-                self.add_notification(f"工具模块热更新失败: {e}", "warning")
+    #         try:
+    #             import src.utils as utils_mod
+    #             importlib.reload(utils_mod)
+    #             self.add_notification("工具模块已热更新", "success")
+    #         except Exception as e:
+    #             self.add_notification(f"工具模块热更新失败: {e}", "warning")
             
-            try:
-                import src.page_selectors as sel_mod
-                importlib.reload(sel_mod)
-                self.add_notification("选择器模块已热更新", "success")
-            except Exception as e:
-                self.add_notification(f"选择器模块热更新失败: {e}", "warning")
+    #         try:
+    #             import src.page_selectors as sel_mod
+    #             importlib.reload(sel_mod)
+    #             self.add_notification("选择器模块已热更新", "success")
+    #         except Exception as e:
+    #             self.add_notification(f"选择器模块热更新失败: {e}", "warning")
     
     def _shutdown_thread(self, keep_browser=False):
         """Run graceful shutdown in a separate thread to avoid blocking."""
@@ -1738,27 +1786,21 @@ class BossService:
         shutdown_thread = threading.Thread(target=self._shutdown_thread, args=(keep_browser,))
         shutdown_thread.start()
 
-    def soft_restart(self):
-        """软重启 - 此方法现在不再需要，因为uvicorn的重载将由新的连接逻辑处理"""
-        self.add_notification("API服务已通过uvicorn重载，无需手动软重启。", "info")
-        # This method is no longer necessary as the new connect_over_cdp logic
-        # handles persistence across reloads triggered by uvicorn.
-        pass
-
     def run(self, host='127.0.0.1', port=5001):
         """运行服务 (使用uvicorn由外部启动)"""
         import uvicorn
         self.add_notification("启动Boss直聘后台服务(FastAPI)...", "info")
         # 禁用自动重载，避免 WatchFiles 导致浏览器上下文被反复重启
-        uvicorn.run("boss_service:app", host=host, port=port, reload=False, log_level="info")
+        uvicorn.run("boss_service:app", host=host, port=port, reload=True, log_level="info")
 
 service = BossService()
 app = service.app
 
 if __name__ == "__main__":
-    host = os.environ.get("BOSS_SERVICE_HOST", "127.0.0.1")
-    try:
-        port = int(os.environ.get("BOSS_SERVICE_PORT", "5001"))
-    except Exception:
-        port = 5001
-    service.run(host=host, port=port)
+    # host = os.environ.get("BOSS_SERVICE_HOST", "127.0.0.1")
+    # try:
+    #     port = int(os.environ.get("BOSS_SERVICE_PORT", "5001"))
+    # except Exception:
+    #     port = 5001
+    # service.run(host=host, port=port)
+    print('不应该从这里启动服务，请运行start_service.py')
