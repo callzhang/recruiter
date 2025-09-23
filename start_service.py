@@ -72,8 +72,7 @@ def start_service():
             "--disable-background-networking",
             "--disable-dev-shm-usage",
             "--disable-extensions",
-            "--no-sandbox",
-            # "--disable-setuid-sandbox",
+            # "--no-sandbox",
             "--window-size=1200,800"
         ]
         try:

@@ -4,10 +4,12 @@
 
 ### 整体架构
 - **服务模式**: FastAPI + Uvicorn ASGI服务器
-- **自动化引擎**: Playwright (Python)
-- **数据存储**: JSON/JSONL文件
+- **自动化引擎**: Playwright (Python) + CDP外部浏览器
+- **数据存储**: JSON/JSONL文件 + 内存缓存
 - **配置管理**: Pydantic + 环境变量
-- **开发模式**: 热重载支持
+- **开发模式**: 热重载支持，进程隔离
+- **AI集成**: OpenAI API + 本地OCR
+- **消息通知**: DingTalk Webhook
 
 ### 核心组件
 
@@ -35,7 +37,18 @@ async def lifespan(app: FastAPI):
 - **数据解析**: 结构化信息提取
 - **黑名单过滤**: 自动过滤不合适的公司和职位
 
-#### 4. 搜索功能
+#### 4. 简历处理系统
+- **WASM文本提取**: 动态解析网站内部数据结构
+- **Canvas钩子技术**: 拦截绘图API重建文本内容
+- **多策略图像捕获**: toDataURL、分页截图、元素截图
+- **OCR服务**: 本地pytesseract + OpenAI Vision API
+
+#### 5. AI决策系统
+- **YAML配置**: 结构化岗位要求和筛选条件
+- **OpenAI集成**: GPT-4辅助简历分析和匹配
+- **DingTalk通知**: 实时HR通知和推荐
+
+#### 6. 搜索功能
 - **参数映射**: 人类可读参数到网站编码的转换
 - **URL生成**: 动态构建搜索URL
 - **预览功能**: 参数验证和URL预览
@@ -100,10 +113,15 @@ BOSS_SERVICE_PORT=5001
 BOSS_STORAGE_STATE_FILE=data/state.json
 BOSS_STORAGE_STATE_JSON='{"cookies":[...]}'
 
-# 浏览器配置
+# 浏览器配置（CDP模式）
+CDP_URL=http://127.0.0.1:9222
 HEADLESS=false
 BASE_URL=https://www.zhipin.com
 SLOWMO_MS=1000
+
+# AI决策配置
+OPENAI_API_KEY=your_openai_api_key
+DINGTALK_WEBHOOK=your_dingtalk_webhook_url
 ```
 
 ### 参数映射表

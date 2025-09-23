@@ -5,18 +5,23 @@
 ## 🚀 功能特性
 
 ### 核心服务
-- **FastAPI后台服务** - 持续运行，支持热重载
+- **FastAPI后台服务** - 持续运行，支持热重载，CDP外部Chrome连接
 - **自动登录管理** - 登录状态持久化，支持滑块验证
 - **候选人数据提取** - 智能选择器，支持黑名单过滤
-- **消息管理** - 获取对话列表，支持消息处理
+- **消息管理** - 获取对话列表，支持消息处理和历史记录
 - **搜索功能** - 参数映射，支持人类可读参数
+- **简历处理** - 在线简历查看，WASM文本提取，OCR图像处理
+- **智能决策** - AI辅助招聘决策，YAML配置岗位要求
+- **通知系统** - DingTalk集成，实时通知HR
 
 ### 技术特性
-- **Playwright自动化** - 浏览器自动化，支持反爬检测
-- **API接口** - RESTful API，支持客户端调用
+- **Playwright自动化** - 浏览器自动化，支持反爬检测，事件驱动架构
+- **API接口** - RESTful API，支持客户端调用，结构化响应
 - **配置管理** - 环境变量，参数映射，选择器配置
 - **数据持久化** - JSONL格式，自动保存
 - **错误恢复** - 页面自动重建，资源清理
+- **多策略简历提取** - WASM解析，Canvas钩子，OCR回退
+- **批量处理** - 并发API调用，批量简历获取
 
 ## 🏃‍♂️ 快速开始
 
@@ -56,6 +61,7 @@ curl "http://127.0.0.1:5001/search?city=北京&job=Python开发"
 ### 数据获取
 - `GET /candidates?limit=N` - 获取候选人列表
 - `GET /messages?limit=N` - 获取消息列表
+- `POST /messages/history` - 获取指定聊天的消息历史
 
 ### 搜索功能
 - `GET /search?city=北京&job=Python开发&experience=3-5年` - 搜索参数预览
@@ -63,7 +69,15 @@ curl "http://127.0.0.1:5001/search?city=北京&job=Python开发"
 ### 操作接口
 - `POST /login` - 手动登录
 - `POST /greet?candidate_id=1&message=你好` - 发送打招呼消息
-- `POST /resume?candidate_id=1` - 读取候选人简历
+- `POST /resume/request` - 发送简历请求给候选人
+
+### 简历处理
+- `POST /resume/online` - 查看在线简历（支持文本提取和图像捕获）
+- 支持多种捕获方法：`auto`（智能选择）、`wasm`（文本提取）、`image`（图像捕获）
+
+### AI决策
+- `POST /decide/pipeline` - AI辅助招聘决策（基于YAML配置）
+- `POST /decide/notify` - 发送DingTalk通知
 
 ## ⚙️ 配置说明
 
@@ -77,9 +91,14 @@ BOSS_SERVICE_PORT=5001
 BOSS_STORAGE_STATE_FILE=data/state.json
 BOSS_STORAGE_STATE_JSON='{"cookies":[...]}'
 
-# 浏览器配置
+# 浏览器配置（CDP模式）
+CDP_URL=http://127.0.0.1:9222
 HEADLESS=false
 BASE_URL=https://www.zhipin.com
+
+# AI决策配置
+OPENAI_API_KEY=your_openai_api_key
+DINGTALK_WEBHOOK=your_dingtalk_webhook_url
 ```
 
 ### 参数映射
@@ -100,18 +119,45 @@ bosszhipin_bot/
 │   ├── mappings.py          # 参数映射
 │   ├── page_selectors.py    # 页面选择器
 │   ├── blacklist.py         # 黑名单管理
-│   └── utils.py             # 工具函数
+│   ├── resume_capture.py    # 简历捕获模块
+│   ├── ocr_service.py       # OCR服务
+│   └── service/             # 服务模块
+│       ├── browser.py       # 浏览器管理
+│       ├── login.py         # 登录服务
+│       ├── messages.py      # 消息服务
+│       └── resume.py        # 简历服务
 ├── data/
 │   ├── state.json           # 登录状态
 │   ├── blacklist.json       # 黑名单配置
 │   └── output/              # 输出数据
+├── jobs/
+│   └── criteria.yaml        # 岗位要求配置
 ├── docs/
 │   ├── status.md            # 项目状态
-│   └── architecture.mermaid # 架构图
+│   ├── technical.md         # 技术文档
+│   ├── architecture.mermaid # 架构图
+│   ├── canvas_image_guide.md # Canvas图像指南
+│   └── client_api_migration.md # API迁移指南
+├── test/                    # 测试文件
+├── command.ipynb            # 演示Notebook
 └── requirements.txt         # 依赖包
 ```
 
 ## 🔧 高级功能
+
+### 智能简历处理
+支持多种简历获取策略，自动选择最佳方法：
+- **WASM文本提取** - 直接解析网站内部数据，获取结构化文本
+- **Canvas钩子** - 拦截Canvas渲染，重建HTML内容
+- **图像捕获** - 多种截图方法，支持分页长简历
+- **OCR处理** - 本地和云端OCR，图像转文本
+
+### AI辅助决策
+基于OpenAI的智能招聘决策系统：
+- **YAML配置** - 结构化岗位要求和筛选条件
+- **智能匹配** - AI分析简历与岗位匹配度
+- **自动通知** - DingTalk集成，实时通知HR
+- **批量处理** - 支持并发处理多个候选人
 
 ### 黑名单过滤
 系统支持自动过滤黑名单公司和职位：
@@ -130,11 +176,17 @@ bosszhipin_bot/
 - 文本匹配
 - 属性匹配
 
-### 热重载开发
-服务支持代码热重载，开发时自动更新：
-```bash
-python start_service.py  # 自动启用 --reload
-```
+### 事件驱动架构
+使用事件驱动模式，提升性能和稳定性：
+- **响应监听** - 自动监听网络响应，获取JSON数据
+- **页面等待** - 智能等待机制，避免time.sleep
+- **缓存管理** - TTL缓存，减少重复请求
+
+### CDP外部浏览器
+使用Chrome DevTools Protocol连接外部浏览器：
+- **持久会话** - 浏览器独立于服务进程
+- **热重载友好** - 服务重启不影响浏览器状态
+- **资源隔离** - 更好的稳定性和性能
 
 ## ⚠️ 风险控制
 
@@ -179,6 +231,16 @@ gunicorn boss_service:app -w 4 -k uvicorn.workers.UvicornWorker
 - 响应时间
 
 ## 🔄 更新日志
+
+### v2.0.0 (2025-09-23) 
+- ✅ 实现智能简历处理系统（WASM + Canvas + OCR）
+- ✅ 添加AI辅助招聘决策流程（OpenAI + YAML配置）
+- ✅ 集成DingTalk通知系统
+- ✅ 优化客户端API（ResumeResult对象，便利方法）
+- ✅ 实现事件驱动架构（避免time.sleep）
+- ✅ 添加CDP外部浏览器支持
+- ✅ 创建交互式Notebook演示
+- ✅ 完善测试覆盖和文档
 
 ### v1.0.0 (2025-09-19)
 - ✅ 完成FastAPI服务架构

@@ -2,7 +2,8 @@
 """
 Boss直聘后台服务（FastAPI版） - 保持登录状态，提供API接口
 """
-from playwright.sync_api import sync_playwright
+import re
+from playwright.sync_api import sync_playwright, expect
 import sys
 import os
 import time
@@ -18,11 +19,16 @@ import signal
 import tempfile # Import tempfile
 import logging # Import logging
 import shutil # Import shutil
+from pathlib import Path
 
 from src.config import settings
 from src.utils import export_records
+from src.chat_utils import ensure_on_chat_page, find_chat_item
+from src.extractors import extract_candidates, extract_messages, extract_chat_history
+from src.actions import request_resume_action
 from src import page_selectors as sel
 from src.blacklist import load_blacklist, NEGATIVE_HINTS
+from src.events import EventManager
 from src import mappings as mapx
 
 class BossService:
@@ -75,8 +81,8 @@ class BossService:
             self.startup_complete = threading.Event() # Event to signal startup completion
             self.initialized = True
             self.setup_routes()
-            # 事件驱动的消息缓存（来自网络响应）
-            self.chat_cache = {}
+            # 事件驱动的消息缓存和响应监听器
+            self.event_manager = EventManager(logger=logging.getLogger(__name__))
             
     def _startup_sync(self):
         """Synchronous startup tasks executed in a thread pool."""
@@ -267,6 +273,56 @@ class BossService:
                     'error': str(e),
                     'timestamp': datetime.now().isoformat()
                 })
+
+        @self.app.get('/messages/history')
+        def get_message_history(chat_id: str = Query(...)):
+            """获取指定会话的聊天历史（右侧面板）"""
+            try:
+                history = self.get_chat_history(chat_id)
+                return JSONResponse({
+                    'success': True,
+                    'chat_id': chat_id,
+                    'messages': history,
+                    'count': len(history),
+                    'timestamp': datetime.now().isoformat()
+                })
+            except Exception as e:
+                return JSONResponse({
+                    'success': False,
+                    'error': str(e),
+                    'timestamp': datetime.now().isoformat()
+                })
+
+        @self.app.post('/resume/online')
+        def view_online_resume_api(chat_id: str = Body(..., embed=True), capture_method: str = Body("auto", embed=True)):
+            """打开会话并查看在线简历，返回canvas图像base64等信息
+            
+            Args:
+                chat_id: 聊天ID
+                capture_method: 捕获方法 ("auto", "wasm", "image")
+            """
+            try:
+                result = self.view_online_resume(chat_id, capture_method)
+                return JSONResponse({
+                    'success': result.get('success', False),
+                    'chat_id': chat_id,
+                    'capture_method': capture_method,
+                    'text': result.get('text'),
+                    'html': result.get('html'),
+                    'image_base64': result.get('image_base64'),
+                    'images_base64': result.get('images_base64'),
+                    'data_url': result.get('data_url'),
+                    'width': result.get('width'),
+                    'height': result.get('height'),
+                    'details': result.get('details', ''),
+                    'timestamp': datetime.now().isoformat()
+                })
+            except Exception as e:
+                return JSONResponse({
+                    'success': False,
+                    'error': str(e),
+                    'timestamp': datetime.now().isoformat()
+                })
         
         @self.app.post('/restart')
         def soft_restart():
@@ -292,9 +348,12 @@ class BossService:
                 # 确保浏览器会话正常
                 self._ensure_browser_session()
                 
-                # 等待页面完全渲染
-                import time
-                time.sleep(3)
+                # 等待页面完全渲染（事件驱动）
+                try:
+                    self.page.locator("body").wait_for(state="visible", timeout=5000)
+                    self.page.wait_for_load_state("networkidle", timeout=5000)
+                except Exception:
+                    pass
                 
                 if not self.page or self.page.is_closed():
                     return JSONResponse({
@@ -320,30 +379,30 @@ class BossService:
                 }
                 
                 # 尝试获取截图
-                try:
-                    screenshot = self.page.screenshot()
-                    import base64
-                    page_info['screenshot'] = base64.b64encode(screenshot).decode('utf-8')
-                except Exception as e:
-                    page_info['screenshot_error'] = str(e)
+                # try:
+                #     screenshot = self.page.screenshot()
+                #     import base64
+                #     page_info['screenshot'] = base64.b64encode(screenshot).decode('utf-8')
+                # except Exception as e:
+                #     page_info['screenshot_error'] = str(e)
                 
                 # 获取cookies
-                try:
-                    page_info['cookies'] = self.page.context.cookies()
-                except Exception as e:
-                    page_info['cookies_error'] = str(e)
+                # try:
+                #     page_info['cookies'] = self.page.context.cookies()
+                # except Exception as e:
+                #     page_info['cookies_error'] = str(e)
                 
-                # 获取local storage
-                try:
-                    page_info['local_storage'] = self.page.evaluate("() => { return {...localStorage}; }")
-                except Exception as e:
-                    page_info['local_storage_error'] = str(e)
+                # # 获取local storage
+                # try:
+                #     page_info['local_storage'] = self.page.evaluate("() => { return {...localStorage}; }")
+                # except Exception as e:
+                #     page_info['local_storage_error'] = str(e)
                 
-                # 获取session storage
-                try:
-                    page_info['session_storage'] = self.page.evaluate("() => { return {...sessionStorage}; }")
-                except Exception as e:
-                    page_info['session_storage_error'] = str(e)
+                # # 获取session storage
+                # try:
+                #     page_info['session_storage'] = self.page.evaluate("() => { return {...sessionStorage}; }")
+                # except Exception as e:
+                #     page_info['session_storage_error'] = str(e)
                 
                 return JSONResponse({
                     'success': True,
@@ -351,6 +410,23 @@ class BossService:
                     'timestamp': datetime.now().isoformat()
                 })
                 
+            except Exception as e:
+                return JSONResponse({
+                    'success': False,
+                    'error': str(e),
+                    'timestamp': datetime.now().isoformat()
+                })
+        
+        @self.app.get('/debug/cache')
+        def get_cache_stats():
+            """获取事件缓存统计信息"""
+            try:
+                stats = self.event_manager.get_cache_stats()
+                return JSONResponse({
+                    'success': True,
+                    'cache_stats': stats,
+                    'timestamp': datetime.now().isoformat()
+                })
             except Exception as e:
                 return JSONResponse({
                     'success': False,
@@ -410,6 +486,25 @@ class BossService:
                 self.add_notification(f"CDP连接失败，终止启动: {e}", "error")
                 raise
 
+            try:
+                local_wasm = Path(__file__).resolve().parent / 'wasm' / 'wasm_canvas-1.0.2-5030.js'
+                if local_wasm.exists():
+                    def _route_resume(route, request):
+                        if request.method.upper() != 'GET':
+                            return route.continue_()
+                        try:
+                            self.add_notification("拦截wasm_canvas脚本，使用本地patched版本", "info")
+                        except Exception:
+                            pass
+                        return route.fulfill(path=str(local_wasm), content_type='application/javascript; charset=utf-8')
+
+                    self.context.unroute("https://static.zhipin.com/assets/zhipin/wasm/resume/wasm_canvas-1.0.2-5030.js")
+                    self.context.route("https://static.zhipin.com/assets/zhipin/wasm/resume/wasm_canvas-1.0.2-5030.js", _route_resume)
+                else:
+                    self.add_notification("本地 wasm_canvas-1.0.2-5030.js 未找到，跳过路由拦截", "warning")
+            except Exception as route_err:
+                self.add_notification(f"设置wasm路由拦截失败: {route_err}", "error")
+
             # （可选）本地存储态仅适用于本地持久化；CDP模式下依靠浏览器自身profile
 
             
@@ -423,66 +518,21 @@ class BossService:
             except Exception:
                 self.page = self.context.new_page()
 
-            # 设置事件驱动监听器：抓取包含会话/消息的网络响应，用于提取 BOSS 内部 chat_id
+            # 设置事件管理器（事件驱动的消息列表获取）
             try:
-                def _on_response(resp):
-                    try:
-                        url = resp.url
-                        if "/web/chat" in url or "/wapi/zpgeek/chat" in url or "/wapi/zpgeek/message" in url:
-                            if resp.request.resource_type == "xhr" or resp.request.resource_type == "fetch":
-                                body = None
-                                try:
-                                    body = resp.text()
-                                except Exception:
-                                    return
-                                if not body:
-                                    return
-                                # 简单提取可能的会话 id 字段（如 conversationId / uid / chatId 等）
-                                # 为了稳健性，做多种键名匹配
-                                import json as _json
-                                try:
-                                    data = _json.loads(body)
-                                except Exception:
-                                    return
-                                def _extract_items(obj):
-                                    if isinstance(obj, dict):
-                                        for k, v in obj.items():
-                                            if isinstance(v, (dict, list)):
-                                                yield from _extract_items(v)
-                                            else:
-            
-                                                yield (k, v)
-                                    elif isinstance(obj, list):
-                                        for it in obj:
-                                            yield from _extract_items(it)
-                                found = {}
-                                for k, v in _extract_items(data):
-                                    lk = str(k).lower()
-                                    if lk in ("chatid", "conversationid", "conv_id", "uid", "sid"):
-                                        found["chat_id"] = v
-                                    elif lk in ("name", "nickname", "geekname", "candidatename"):
-                                        found.setdefault("candidate", v)
-                                    elif lk in ("jobtitle", "job", "job_name"):
-                                        found.setdefault("job_title", v)
-                                    elif lk in ("msg", "message", "lastmsg", "last_message"):
-                                        found.setdefault("message", v)
-                                    elif lk in ("status", "unread", "unread_count"):
-                                        found.setdefault("status", v)
-                                if found.get("chat_id"):
-                                    # 用 chat_id 作为 key 缓存
-                                    self.chat_cache[str(found["chat_id"]) ] = found
-                    except Exception:
-                        return
                 if self.context:
-                    self.context.on("response", _on_response)
-            except Exception:
-                pass
+                    self.event_manager.setup(self.context)
+                    self.add_notification("事件管理器设置成功", "success")
+            except Exception as e:
+                self.add_notification(f"事件管理器设置失败: {e}", "error")
 
             # 导航到聊天页面
             self.add_notification("导航到聊天页面...", "info")
             try:
                 if settings.CHAT_URL not in getattr(self.page, 'url', ''):
                     self.page.goto(settings.CHAT_URL, wait_until="domcontentloaded", timeout=3000)
+                else:
+                    self.add_notification("已导航到聊天页面", "info")
             except Exception:
                 # 忽略短暂错误，后续请求会再次校验
                 pass
@@ -542,7 +592,10 @@ class BossService:
                 # 访问聊天页面
                 self.page.goto(settings.BASE_URL.rstrip('/') + "/web/chat/index", 
                              wait_until="domcontentloaded", timeout=10000)
-                time.sleep(3)
+                try:
+                    self.page.wait_for_load_state("networkidle", timeout=5000)
+                except Exception:
+                    pass
                 
                 page_text = self.page.locator("body").inner_text()
                 current_url = self.page.url
@@ -611,7 +664,10 @@ class BossService:
             self.page.goto(settings.CHAT_URL, wait_until="domcontentloaded", timeout=30000)
             
             # Wait for page to load and check if we were redirected to login page
-            time.sleep(3)
+            try:
+                self.page.wait_for_load_state("networkidle", timeout=5000)
+            except Exception:
+                pass
             current_url = self.page.url
             
             # Check if we were redirected to login page
@@ -691,173 +747,27 @@ class BossService:
             self.add_notification(f"获取候选人列表 (限制: {limit})", "info")
             
             try:
-                # 访问聊天页面并充分等待
-                self.page.goto(
-                    settings.CHAT_URL,
-                    wait_until="domcontentloaded",
-                    timeout=6000 
-                )
-                
-                # 等待页面完全加载，特别是等待"加载中"消失
-                self.add_notification("等待聊天页面加载完成...", "info")
-                
-                # 等待"加载中"文本消失
+                # 访问聊天页面并等待就绪
+                ensure_on_chat_page(self.page, settings, self.add_notification, timeout_ms=6000)
+                # 等待加载提示消失
                 try:
                     self.page.wait_for_function(
                         "() => !document.body.innerText.includes('加载中，请稍候')",
                         timeout=30000
                     )
-                    self.add_notification("页面加载完成", "success")
-                except Exception as e:
-                    self.add_notification(f"等待页面加载超时: {e}", "warning")
-                
-                # 额外等待确保内容渲染
-                time.sleep(3)
-                
-                # 调试：检查当前页面URL和内容
-                current_url = self.page.url
-                page_title = self.page.title()
-                self.add_notification(f"当前页面URL: {current_url}", "info")
-                self.add_notification(f"页面标题: {page_title}", "info")
-                
-                # 检查页面内容
-                page_text = self.page.locator("body").inner_text()
-                if "消息" in page_text or "聊天" in page_text or "全部" in page_text:
-                    self.add_notification("检测到聊天页面内容", "success")
-                else:
-                    self.add_notification("未检测到聊天页面内容", "warning")
-                    self.add_notification(f"页面内容预览: {page_text[:200]}...", "info")
-
-                # 尝试点击“全部”标签以触发列表渲染
-                try:
-                    tab_all = self.page.locator(
-                        "xpath=//span[contains(., '全部')]/ancestor::a | xpath=//a[contains(., '全部')]"
-                    )
-                    if tab_all.count() > 0:
-                        tab_all.first.click()
-                        time.sleep(0.5)
                 except Exception:
                     pass
-
-                # 等待会话列表元素出现（最多20秒），并尝试轻微滚动促使懒加载
-                selectors_wait = sel.conversation_list_items()
-                start_wait = time.time()
-                while time.time() - start_wait < 20:
-                    has_any = False
-                    for s in selectors_wait:
-                        try:
-                            if self.page.locator(s).count() > 0:
-                                has_any = True
-                                break
-                        except Exception:
-                            continue
-                    if has_any:
-                        break
-                    try:
-                        self.page.mouse.wheel(0, 800)
-                    except Exception:
-                        pass
-                    time.sleep(0.3)
             except Exception as e:
                 self.add_notification(f"访问聊天页面失败: {e}", "error")
                 raise Exception(f"访问聊天页面失败: {e}")
             
-            candidates = []
+            # DOM 提取
+            candidates = extract_candidates(self.page, limit=limit, add_notification=self.add_notification)
         
-        # 对齐 get_jobs 的聊天列表选择器
-        selectors = sel.conversation_list_items()
-        
-        for selector in selectors:
-            try:
-                elements = self.page.locator(selector).all()
-                if elements:
-                    self.add_notification(f"使用选择器 {selector} 找到 {len(elements)} 个元素", "info")
-                    
-                    for i, elem in enumerate(elements[:limit]):
-                        try:
-                            text = elem.inner_text().strip()
-                            if (text and len(text) > 10 and 
-                                "未选中联系人" not in text and
-                                "全部" not in text and
-                                "新招呼" not in text and
-                                "沟通中" not in text and
-                                "已约面" not in text and
-                                "已获取简历" not in text and
-                                "已交换电话" not in text and
-                                "已交换微信" not in text and
-                                "收藏" not in text and
-                                "更多" not in text):
-                                
-                                candidate = {
-                                    'id': i + 1,
-                                    'raw_text': text,
-                                    'timestamp': datetime.now().isoformat()
-                                }
-                                
-                                # 尝试提取结构化信息
-                                lines = text.split('\n')
-                                for line in lines:
-                                    line = line.strip()
-                                    if '岁' in line:
-                                        candidate['age'] = line
-                                    elif any(edu in line for edu in ['本科', '硕士', '大专', '博士']):
-                                        candidate['education'] = line
-                                    elif '年' in line and '经验' in line:
-                                        candidate['experience'] = line
-                                    elif any(city in line for city in ['市', '区', '省']):
-                                        candidate['location'] = line
-                                    elif any(job in line for job in ['工程师', '开发', '算法', '产品', '运营', '销售']):
-                                        candidate['position'] = line
-                                
-                                # 读取公司名与最后一条消息（提升结构化程度）
-                                try:
-                                    comp_sels = sel.chat_company_name_items()
-                                    for cs in comp_sels:
-                                        loc = elem.locator(cs)
-                                        if loc.count() > 0:
-                                            candidate['company'] = (loc.first.inner_text() or '').strip()
-                                            break
-                                except Exception:
-                                    pass
-                                try:
-                                    last_sels = sel.chat_last_message_items()
-                                    for ls in last_sels:
-                                        loc2 = elem.locator(ls)
-                                        if loc2.count() > 0:
-                                            candidate['last_message'] = (loc2.first.inner_text() or '').strip()
-                                            break
-                                except Exception:
-                                    pass
-                                
-                                # 黑名单过滤：公司名命中则跳过
-                                comp = candidate.get('company', '')
-                                if comp and any(b in comp for b in self.black_companies):
-                                    continue
-                                candidates.append(candidate)
-                                
-                        except Exception as e:
-                            print(f"[!] 提取第 {i+1} 个候选人信息失败: {e}")
-                            continue
-                    
-                    if candidates:
-                        break
-                        
-            except Exception as e:
-                print(f"[!] 选择器 {selector} 失败: {e}")
-                continue
-        
-        if not candidates:
-            # 输出各选择器的命中统计，便于调试
-            try:
-                counts = {}
-                for s in selectors:
-                    try:
-                        counts[s] = self.page.locator(s).count()
-                    except Exception:
-                        counts[s] = -1
-                self.add_notification(f"候选人列表为空，命中统计: {counts}", "warning")
-            except Exception:
-                pass
+        # 黑名单过滤（如果存在）
+        if candidates and hasattr(self, 'black_companies'):
+            candidates = [c for c in candidates if not (c.get('company') and any(b in c.get('company') for b in self.black_companies))]
+
         self.add_notification(f"成功获取 {len(candidates)} 个候选人", "success")
         
         # 保存候选人数据到文件
@@ -890,513 +800,87 @@ class BossService:
             self.add_notification(f"获取消息列表 (限制: {limit})", "info")
             
             try:
-                # Single-pass DOM snapshot first (no sleeps/clicks); fallback to cache
-                messages = []
-                # 轻量确保在聊天页
-                try:
-                    if settings.CHAT_URL not in self.page.url:
-                        self.page.goto(settings.CHAT_URL, wait_until="domcontentloaded", timeout=3000)
-                except Exception:
-                    pass
-
-                item_selectors = [
-                    "div.geek-item",
-                    "[role='listitem']"
-                ]
-
-                def _text_safe(loc):
-                    try:
-                        return loc.inner_text()
-                    except Exception:
-                        return ""
-
-                def _attr_safe(loc, name):
-                    try:
-                        return loc.get_attribute(name)
-                    except Exception:
-                        return None
-
-                for sel in item_selectors:
-                    try:
-                        elems = self.page.locator(sel).all()
-                    except Exception:
-                        elems = []
-                    for elem in elems:
-                        try:
-                            chat_id = _attr_safe(elem, 'data-id') or _attr_safe(elem, 'id')
-                            name_loc = elem.locator('.geek-name').first
-                            job_loc = elem.locator('.source-job').first
-                            time_loc = elem.locator('.time-shadow').first
-                            msg_loc = elem.locator('.push-text').first
-
-                            candidate = _text_safe(name_loc).strip()
-                            job_title = _text_safe(job_loc).strip() or '未知'
-                            time_info = _text_safe(time_loc).strip() or '未知'
-                            last_message = _text_safe(msg_loc).strip()
-
-                            if not candidate:
-                                block = _text_safe(elem)
-                                if not block:
-                                    continue
-                                if job_title == '未知':
-                                    job_title = '算法工程师' if '算法工程师' in block else '未知'
-                                if not last_message:
-                                    last_message = block[:120]
-
-                            status = '—'
-                            if self.chat_cache:
-                                for _, cached in self.chat_cache.items():
-                                    cname = cached.get('candidate')
-                                    if cname and candidate and cname in candidate:
-                                        chat_id = chat_id or cached.get('chat_id')
-                                        last_message = cached.get('message') or last_message
-                                        job_title = cached.get('job_title') or job_title
-                                        status = cached.get('status') or status
-                                        break
-
-                            item = {
-                                'chat_id': chat_id,
-                                'candidate': candidate,
-                                'message': last_message,
-                                'status': status,
-                                'job_title': job_title,
-                                'time': time_info
-                            }
-                            if item['candidate']:
-                                messages.append(item)
-                                if len(messages) >= limit:
-                                    break
-                        except Exception:
-                            continue
-                    if len(messages) >= limit:
-                        break
-
-                if not messages and self.chat_cache:
-                    for _, cached in list(self.chat_cache.items())[:limit]:
-                        messages.append({
-                            'chat_id': cached.get('chat_id'),
-                            'candidate': cached.get('candidate'),
-                            'message': cached.get('message'),
-                            'status': cached.get('status') or '—',
-                            'job_title': cached.get('job_title') or '未知',
-                            'time': cached.get('time') or '未知'
-                        })
-
+                ensure_on_chat_page(self.page, settings, self.add_notification, timeout_ms=6000)
+                messages = extract_messages(self.page, limit=limit, chat_cache=self.event_manager.chat_cache.get_all())
+                if not messages:
+                    # 使用事件管理器获取缓存的消息
+                    messages = self.event_manager.get_cached_messages(limit)
                 if not messages:
                     self.add_notification("消息列表为空（DOM+缓存均无）", "warning")
-
                 self.add_notification(f"成功获取 {len(messages)} 条消息", "success")
                 return messages
 
-                # 检查当前页面状态
-                current_url = self.page.url
-                self.add_notification(f"当前页面: {current_url}", "info")
-                
-                # 如果不在聊天页面，导航到聊天页面
-                if settings.CHAT_URL not in current_url:
-                    self.add_notification("导航到聊天页面...", "info")
-                    self.page.goto(settings.CHAT_URL, wait_until="domcontentloaded", timeout=30000)
-                    time.sleep(2)  # 等待页面稳定
-
-                self.add_notification("等待聊天页面加载完成...", "info")
-                try:
-                    self.page.wait_for_function(
-                        "() => !document.body.innerText.includes('加载中，请稍候')",
-                        timeout=30000
-                    )
-                    self.add_notification("页面加载完成", "success")
-                except Exception as e:
-                    self.add_notification(f"等待页面加载超时: {e}", "warning")
-                
-                # 事件驱动为主，尽量不阻塞。仅做极短让步
-                time.sleep(0.3)
-                
-                # 尝试点击"全部"标签以触发列表渲染
-                try:
-                    # 依次尝试两个 XPath，避免并集表达式兼容性问题
-                    tab1 = self.page.locator("xpath=//span[contains(., '全部')]/ancestor::a")
-                    tab2 = self.page.locator("xpath=//a[contains(., '全部')]")
-                    clicked = False
-                    if tab1.count() > 0:
-                        tab1.first.click()
-                        clicked = True
-                    elif tab2.count() > 0:
-                        tab2.first.click()
-                        clicked = True
-                    if clicked:
-                        time.sleep(1)
-                        self.add_notification("已点击'全部'标签", "info")
-                except Exception as e:
-                    self.add_notification(f"点击'全部'标签失败: {e}", "warning")
-                
-                # 等待"加载中，请稍候"文本消失
-                try:
-                    self.page.wait_for_function(
-                        "() => !document.body.innerText.includes('加载中，请稍候')",
-                        timeout=30000
-                    )
-                    self.add_notification("页面加载完成", "success")
-                except Exception as e:
-                    self.add_notification(f"等待页面加载超时: {e}", "warning")
-                
-                # 尝试等待对话列表加载
-                try:
-                    # 等待可能的对话列表元素出现
-                    self.page.wait_for_selector("li, .conversation, .chat-item, [class*='conversation'], [class*='chat']", timeout=10000)
-                    self.add_notification("检测到对话列表元素", "info")
-                except Exception as e:
-                    self.add_notification(f"等待对话列表元素超时: {e}", "warning")
-                
-                # 尝试滚动页面以触发懒加载
-                try:
-                    self.page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                    time.sleep(2)
-                    self.page.evaluate("window.scrollTo(0, 0)")
-                    time.sleep(2)
-                    self.add_notification("已滚动页面以触发懒加载", "info")
-                except Exception as e:
-                    self.add_notification(f"滚动页面失败: {e}", "warning")
-                
-                # 等待网络请求完成
-                try:
-                    self.page.wait_for_load_state("networkidle", timeout=15000)
-                    self.add_notification("网络请求已完成", "info")
-                except Exception as e:
-                    self.add_notification(f"等待网络请求超时: {e}", "warning")
-                
-                messages = []
-                
-                # 调试：输出页面内容以了解结构
-                try:
-                    page_text = self.page.locator("body").inner_text()
-                    self.add_notification(f"页面内容长度: {len(page_text)}", "info")
-                    # 查找是否包含候选人姓名
-                    if any(name in page_text for name in ['易飞', '孙朋', 'Khalil', '牛小林', '林雪', '李卓书']):
-                        self.add_notification("页面包含候选人姓名", "success")
-                    else:
-                        self.add_notification("页面不包含候选人姓名", "warning")
-                    
-                except Exception as e:
-                    self.add_notification(f"调试页面内容失败: {e}", "warning")
-                
-                # 先获取当前页面HTML内容进行调试
-                self.add_notification("开始分析页面HTML结构...", "info")
-                
-                try:
-                    # 等待页面完全加载
-                    time.sleep(3)
-                    
-                    # 获取页面所有文本内容
-                    page_text = self.page.locator("body").inner_text()
-                    self.add_notification(f"页面文本长度: {len(page_text)}", "info")
-                    
-                    # 检查是否包含候选人姓名
-                    candidate_names = ["易飞", "孙朋", "Khalil", "牛小林", "林雪", "李卓书"]
-                    found_candidates = []
-                    
-                    for name in candidate_names:
-                        if name in page_text:
-                            found_candidates.append(name)
-                    
-                    self.add_notification(f"在页面中找到候选人: {found_candidates}", "info")
-                    
-                    if not found_candidates:
-                        self.add_notification("页面中未找到任何候选人姓名，可能需要滚动或等待页面加载", "warning")
-                        
-                        # 尝试点击"全部"选项卡确保显示所有对话
-                        try:
-                            all_tab = self.page.locator("text=全部").first
-                            if all_tab.count() > 0:
-                                all_tab.click()
-                                self.add_notification("点击了'全部'选项卡", "info")
-                                time.sleep(2)
-                        except Exception as e:
-                            self.add_notification(f"点击'全部'选项卡失败: {e}", "warning")
-                        
-                        # 尝试滚动页面
-                        try:
-                            self.page.keyboard.press("PageDown")
-                            time.sleep(1)
-                            self.page.keyboard.press("PageUp")
-                            time.sleep(1)
-                            self.add_notification("已滚动页面", "info")
-                        except Exception as e:
-                            self.add_notification(f"滚动页面失败: {e}", "warning")
-                    
-                # 尝试查找对话列表的容器
-                    conversation_selectors = [
-                        "[role='listitem']",
-                        ".geek-item",
-                        "[class*='conversation']",
-                        "[class*='chat']",
-                        "[class*='message']",
-                        "li[class*='item']",
-                        "[class*='dialog']"
-                    ]
-                    
-                    for selector in conversation_selectors:
-                        try:
-                            elements = self.page.locator(selector).all()
-                            element_count = len(elements)
-                            self.add_notification(f"选择器 '{selector}' 找到 {element_count} 个元素", "info")
-                            
-                            if element_count > 0 and element_count < 50:  # 合理的数量范围
-                                for i, elem in enumerate(elements[:20]):  # 限制处理前20个
-                                    try:
-                                        elem_text = elem.inner_text()
-                                        
-                                        # 检查是否包含候选人姓名且不是菜单项
-                                        menu_keywords = [
-                                            "个人中心", "账号设置", "钱包/发票", "桌面客户端", 
-                                            "最佳招聘官", "退出登录", "星尘纪元", "首充优惠", 
-                                            "直豆", "道具来源", "不合适", "牛人发起", "我发起"
-                                        ]
-                                        
-                                        # 排除菜单项
-                                        if any(keyword in elem_text for keyword in menu_keywords):
-                                            continue
-                                        
-                                        # 检查是否包含候选人姓名
-                                        found_candidate = None
-                                        for name in candidate_names:
-                                            if name in elem_text:
-                                                found_candidate = name
-                                                break
-                                        
-                                        if found_candidate and len(elem_text.strip()) > 15:
-                                            # 提取职位信息
-                                            job_title = "未知"
-                                            job_keywords = ["算法工程师", "工程师", "开发", "程序员", "技术"]
-                                            for job_keyword in job_keywords:
-                                                if job_keyword in elem_text:
-                                                    job_title = job_keyword
-                                                    break
-                                            
-                                            # 提取时间信息
-                                            time_info = "未知"
-                                            time_keywords = ["分钟前", "小时前", "昨天", "月", "日", ":"]
-                                            lines = elem_text.split('\n')
-                                            for line in lines:
-                                                line = line.strip()
-                                                for time_keyword in time_keywords:
-                                                    if time_keyword in line and len(line) < 50:
-                                                        time_info = line
-                                                        break
-                                                if time_info != "未知":
-                                                    break
-                                            
-                                            # 提取最后消息内容（通常是最长的一行文本）
-                                            last_message = ""
-                                            max_len = 0
-                                            for line in lines:
-                                                line = line.strip()
-                                                if (len(line) > max_len and 
-                                                    len(line) < 200 and 
-                                                    found_candidate not in line and
-                                                    not any(keyword in line for keyword in menu_keywords)):
-                                                    max_len = len(line)
-                                                    last_message = line
-                                            
-                                            if not last_message:
-                                                last_message = elem_text.strip()[:100] + "..."
-                                            
-                                            # 优先从DOM属性提取 chat_id（data-id 或 id）
-                                            chat_id = None
-                                            try:
-                                                dom_data_id = None
-                                                try:
-                                                    dom_data_id = elem.get_attribute('data-id')
-                                                except Exception:
-                                                    dom_data_id = None
-                                                if not dom_data_id:
-                                                    try:
-                                                        dom_data_id = elem.get_attribute('id')
-                                                    except Exception:
-                                                        dom_data_id = None
-                                                if dom_data_id:
-                                                    chat_id = dom_data_id
-                                            except Exception:
-                                                pass
-
-                                            # 其次使用事件缓存的 chat_id
-                                            for cid, cached in self.chat_cache.items():
-                                                cname = cached.get('candidate')
-                                                if cname and cname in elem_text:
-                                                    if chat_id is None:
-                                                        chat_id = cached.get('chat_id')
-                                                    # 回填 message/job_title/status
-                                                    if cached.get('message'): last_message = cached['message']
-                                                    if cached.get('job_title'): job_title = cached['job_title']
-                                                    status = cached.get('status')
-                                                    break
-                                            item = {
-                                                'chat_id': chat_id if chat_id is not None else len(messages) + 1,
-                                                'candidate': found_candidate,
-                                                'message': last_message,
-                                                'status': status if 'status' in locals() else '—',
-                                                'job_title': job_title,
-                                                'time': time_info
-                                            }
-                                            messages.append(item)
-                                            
-                                            self.add_notification(f"从选择器 '{selector}' 找到对话: {found_candidate} - {job_title}", "success")
-                                            
-                                            if len(messages) >= limit:
-                                                break
-                                    
-                                    except Exception as e:
-                                        self.add_notification(f"处理元素 {i} 失败: {e}", "warning")
-                                        continue
-                            
-                            if len(messages) >= limit:
-                                break
-                                
-                        except Exception as e:
-                            self.add_notification(f"使用选择器 '{selector}' 失败: {e}", "warning")
-                            continue
-                
-                except Exception as e:
-                    self.add_notification(f"搜索对话列表时发生错误: {e}", "error")
-                
-                if not messages:
-                    self.add_notification(f"消息列表为空，请检查页面或选择器。", "warning")
-                
-                self.add_notification(f"成功获取 {len(messages)} 条消息", "success")
-                return messages
-                
             except Exception as e:
                 self.add_notification(f"获取消息列表失败: {e}", "error")
                 raise
-
-    def _recreate_page(self):
-        """重新创建页面"""
-        try:
-            if self.page and not self.page.is_closed():
-                self.page.close()
-        except Exception:
-            pass
-        
-        try:
-            # 重新创建页面
-            self.page = self.context.new_page() # Changed from self.browser.context to self.context
-            # 立即导航到聊天页面
-            try:
-                if settings.CHAT_URL not in self.page.url:
-                    self.page.goto(settings.CHAT_URL, wait_until="domcontentloaded", timeout=30000)
-            except Exception:
-                pass
-            # 不再处理空白页，统一复用初始页
-            self.add_notification("页面已重新创建", "info")
-        except Exception as e:
-            self.add_notification(f"重新创建页面失败: {e}", "error")
-            raise Exception(f"重新创建页面失败: {e}")
 
     def request_resume(self, chat_id: str) -> dict:
         """对某个对话发送求简历请求。如果已存在“简历请求已发送”，则不重复发送。
         返回: { success: bool, already_sent: bool, details: str }
         """
-        with self.lock:
-            # 确保浏览器会话和登录
-            self._ensure_browser_session()
-            if not self.is_logged_in and not self.ensure_login():
-                raise Exception("未登录")
 
-            try:
-                # 确保在聊天页面
-                try:
-                    if settings.CHAT_URL not in self.page.url:
-                        self.page.goto(settings.CHAT_URL, wait_until="domcontentloaded", timeout=3000)
-                except Exception:
-                    pass
+        # 确保浏览器会话和登录
+        self._ensure_browser_session()
+        if not self.is_logged_in and not self.ensure_login():
+            raise Exception("未登录")
 
-                # 选中指定 chat_id 的列表项
-                target = None
-                for sel in ["div.geek-item", "[role='listitem']"]:
-                    try:
-                        items = self.page.locator(sel).all()
-                    except Exception:
-                        items = []
-                    for it in items:
-                        try:
-                            did = it.get_attribute('data-id') or it.get_attribute('id')
-                            if did and chat_id and did == chat_id:
-                                target = it
-                                break
-                        except Exception:
-                            continue
-                    if target:
-                        break
+        try:
+            ensure_on_chat_page(self.page, settings, self.add_notification, timeout_ms=6000)
+            return request_resume_action(self.page, chat_id)
+        except Exception as e:
+            self.add_notification(f"求简历操作失败: {e}", "error")
+            raise
 
-                if not target:
-                    return { 'success': False, 'already_sent': False, 'details': '未找到指定对话项' }
+    def get_chat_history(self, chat_id: str) -> list[dict]:
+        """读取右侧聊天历史，返回结构化消息列表。
+        依赖 DOM 结构：
+        - 容器：div.conversation-message
+        - 列表：div.chat-message-list
+        - 每条：div.message-item
+        - 时间：.message-time .time
+        - 文本：.item-friend .text span 或系统卡片 .item-system
+        """
+        # 确保会话
+        self._ensure_browser_session()
+        if not self.is_logged_in and not self.ensure_login():
+            raise Exception("未登录")
 
-                # 点击打开右侧对话面板
-                try:
-                    target.click()
-                except Exception as e:
-                    return { 'success': False, 'already_sent': False, 'details': f'点击对话失败: {e}' }
+        ensure_on_chat_page(self.page, settings, self.add_notification, timeout_ms=6000)
+        history = extract_chat_history(self.page, chat_id)
+        return history
 
-                # 检查是否已发送过“简历请求已发送”
-                try:
-                    panel_text = self.page.locator("body").inner_text()
-                    if "简历请求已发送" in panel_text:
-                        return { 'success': True, 'already_sent': True, 'details': '已存在简历请求' }
-                except Exception:
-                    pass
+    def view_online_resume(self, chat_id: str, capture_method: str = "auto") -> dict:
+        """点击会话 -> 点击“在线简历” -> 使用多级回退链条输出文本或图像。"""
+        # 会话与登录
+        self._ensure_browser_session()
+        if not self.is_logged_in and not self.ensure_login():
+            raise Exception("未登录")
 
-                # 查找“求简历”按钮并点击
-                clicked = False
-                resume_btn_selectors = [
-                    "xpath=//button[contains(., '求简历')]",
-                    "xpath=//a[contains(., '求简历')]",
-                    "text=求简历"
-                ]
-                for bsel in resume_btn_selectors:
-                    try:
-                        btn = self.page.locator(bsel).first
-                        if btn and btn.count() > 0:
-                            btn.click()
-                            clicked = True
-                            break
-                    except Exception:
-                        continue
+        try:
+            from src.resume_capture import capture_resume_from_chat
+        except Exception as e:
+            self.add_notification(f"导入resume_capture失败: {e}", "error")
+            # 若导入失败，保留旧实现的最后兜底
+            return { 'success': False, 'details': '内部模块导入失败' }
 
-                if not clicked:
-                    return { 'success': False, 'already_sent': False, 'details': '未找到“求简历”按钮' }
-
-                # 验证是否出现“简历请求已发送”
-                try:
-                    # 用短等待避免长阻塞
-                    self.page.wait_for_function(
-                        "() => document.body.innerText.includes('简历请求已发送')",
-                        timeout=2000
-                    )
-                    return { 'success': True, 'already_sent': False, 'details': '简历请求已发送' }
-                except Exception:
-                    # 再做一次快照检查
-                    try:
-                        panel_text = self.page.locator("body").inner_text()
-                        if "简历请求已发送" in panel_text:
-                            return { 'success': True, 'already_sent': False, 'details': '简历请求已发送' }
-                    except Exception:
-                        pass
-                    return { 'success': False, 'already_sent': False, 'details': '未检测到发送成功提示' }
-
-            except Exception as e:
-                self.add_notification(f"求简历操作失败: {e}", "error")
-                raise
+        result = capture_resume_from_chat(self.page, chat_id, logger=self.logger, capture_method=capture_method)
+        # 统一加上success存在性
+        if not isinstance(result, dict):
+            return { 'success': False, 'details': '未知错误: 结果类型异常' }
+        if 'success' not in result:
+            result['success'] = bool(result.get('text') or result.get('image_base64') or result.get('data_url'))
+        return result
     
     def _graceful_shutdown(self):
         """Gracefully shut down Playwright resources."""
         self.add_notification("执行优雅关闭...", "info")
-        # For a persistent context, we just need to close the context.
-        # The data is saved on disk.
-        if hasattr(self, 'context') and self.context:
-            try:
-                self.context.close()
-                self.add_notification("浏览器Context已关闭。", "success")
-            except Exception as e:
-                self.add_notification(f"关闭浏览器Context时出错: {e}", "warning")
+        # For external CDP-attached browser, do not close the shared context; just detach listeners.
+        try:
+            if hasattr(self, 'context') and self.context:
+                # Best effort: remove response listeners if needed
+                pass
+        except Exception as e:
+            self.add_notification(f"清理CDP监听时出错: {e}", "warning")
         
         if self.playwright:
             try:
@@ -1410,21 +894,6 @@ class BossService:
         self.playwright = None
         self.add_notification("Playwright资源已清理", "success")
     
-    def start_file_watcher(self):
-        """已禁用：使用 uvicorn --reload 实现热重载"""
-        return
-    
-    def _file_watcher_loop(self):
-        """已禁用"""
-        return
-    
-    def _get_file_hash(self, file_path):
-        """已禁用"""
-        return None
-    
-    def _soft_restart(self):
-        """已禁用（uvicorn --reload 负责重载）"""
-        return
 
     def _ensure_browser_session(self):
         # Context present?
@@ -1437,7 +906,16 @@ class BossService:
         if not self.page or self.page.is_closed():
             try:
                 pages = list(self.context.pages)
-                assert any(settings.BASE_URL in p.url for p in pages)
+                self.page = pages[0] if pages else self.context.new_page()
+                if settings.CHAT_URL not in getattr(self.page, 'url', ''):
+                    try:
+                        self.page.goto(settings.CHAT_URL, wait_until="domcontentloaded", timeout=10000)
+                        try:
+                            self.page.wait_for_load_state("networkidle", timeout=5000)
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
             except Exception:
                 self.start_browser()
                 return
@@ -1481,7 +959,10 @@ class BossService:
                     self.page.wait_for_load_state("networkidle", timeout=10000)
                 except Exception:
                     pass
-                time.sleep(2)
+                try:
+                    self.page.wait_for_load_state("networkidle", timeout=3000)
+                except Exception:
+                    pass
                 
                 # 查找指定候选人的对话项
                 candidates = self.get_candidates_list(limit=50)  # 获取更多候选人
@@ -1516,7 +997,10 @@ class BossService:
                     raise Exception("无法点击候选人对话项")
                 
                 # 等待聊天窗口加载
-                time.sleep(3)
+                try:
+                    self.page.wait_for_load_state("networkidle", timeout=3000)
+                except Exception:
+                    pass
                 
                 # 查找简历相关按钮或链接
                 resume_data = {}
@@ -1552,7 +1036,10 @@ class BossService:
                         candidate_area = self.page.locator("xpath=//div[contains(@class, 'chat') or contains(@class, 'conversation')]").first
                         if candidate_area.count() > 0:
                             candidate_area.click(button="right")
-                            time.sleep(1)
+                            try:
+                                self.page.wait_for_timeout(1000)
+                            except Exception:
+                                pass
                             
                             # 查找右键菜单中的简历选项
                             menu_selectors = [
@@ -1567,7 +1054,10 @@ class BossService:
                                     if menu_item.count() > 0:
                                         menu_item.click()
                                         self.add_notification("已通过右键菜单访问简历", "info")
-                                        time.sleep(2)
+                                        try:
+                                            self.page.wait_for_timeout(2000)
+                                        except Exception:
+                                            pass
                                         resume_found = True
                                         break
                                 except Exception:
@@ -1577,7 +1067,10 @@ class BossService:
                 
                 if resume_found:
                     # 等待简历页面或弹窗加载
-                    time.sleep(3)
+                    try:
+                        self.page.wait_for_timeout(3000)
+                    except Exception:
+                        pass
                     
                     # 提取简历信息
                     resume_info = {}
