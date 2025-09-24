@@ -1,0 +1,26 @@
+---
+alwaysApply: true
+---
+# Workflow & Conventions
+
+Startup discipline:
+- Before coding: read [docs/architecture.mermaid](mdc:docs/architecture.mermaid), [docs/technical.md](mdc:docs/technical.md), [tasks/tasks.md](mdc:tasks/tasks.md), [docs/status.md](mdc:docs/status.md), [changelog.md](mdc:changelog.md).
+- Use CDP external Chrome (launched by [start_service.py](mdc:start_service.py)); no local Playwright launch fallback.
+- Keep `uvicorn --reload` enabled; re-attach on service reload.
+
+Edits & PR hygiene:
+- Prefer editing existing modules; create new files only when justified.
+- After implementing features: update [docs/status.md](mdc:docs/status.md) and add tests in [test/](mdc:test/).
+- Use absolute paths in tool calls where possible.
+
+Service run:
+- Start with `python start_service.py`.
+- Configure via [src/config.py](mdc:src/config.py) and environment variables (e.g., `CDP_URL`, `OPENAI_API_KEY`, `DINGTALK_WEBHOOK`).
+
+Data extraction:
+- Avoid `time.sleep()`; rely on Playwright auto-wait and event-driven parsing.
+- Prefer snapshot-first DOM parsing; keep selectors in [src/page_selectors.py](mdc:src/page_selectors.py).
+
+Resume flow:
+- Prefer `canvas.toDataURL` inside resume iframe; fallback to new-tab `full_page` screenshot.
+- Integrate OCR (local/OpenAI/HTTP) and feed into decision pipeline with YAML criteria.

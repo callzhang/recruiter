@@ -1,0 +1,12 @@
+---
+globs: boss_service.py
+---
+# Service-specific Practices (boss_service.py)
+
+- Use a single `context` and `page`. On failure, safely recreate the page; avoid assertions.
+- CDP mode: do not close external Chrome context on shutdown; only stop Playwright.
+- Response listener: parse only JSON with small content; store chat cache with TTL; key by string `chat_id`.
+- `ensure_login`: prefer short waits and fail fast; avoid long blocking loops in endpoints.
+- `request_resume`: use locator waits and valid selectors (no `has_not_text`), then verify via `wait_for_function`.
+- `view_online_resume`: text-first (WASM/canvas hooks), then `toDataURL`, then new-tab `full_page` as a fallback.
+- Avoid `time.sleep()`; use `wait_for_selector`, `wait_for_function`, and `networkidle` when needed.

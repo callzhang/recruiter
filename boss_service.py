@@ -30,6 +30,7 @@ from src import page_selectors as sel
 from src.blacklist import load_blacklist, NEGATIVE_HINTS
 from src.events import EventManager
 from src import mappings as mapx
+from src.resume_capture import capture_resume_from_chat
 
 class BossService:
     _instance = None
@@ -856,13 +857,6 @@ class BossService:
         if not self.is_logged_in and not self.ensure_login():
             raise Exception("未登录")
 
-        try:
-            from src.resume_capture import capture_resume_from_chat
-        except Exception as e:
-            self.add_notification(f"导入resume_capture失败: {e}", "error")
-            # 若导入失败，保留旧实现的最后兜底
-            return { 'success': False, 'details': '内部模块导入失败' }
-
         result = capture_resume_from_chat(self.page, chat_id, logger=self.logger, capture_method=capture_method)
         # 统一加上success存在性
         if not isinstance(result, dict):
@@ -1207,64 +1201,6 @@ class BossService:
             
         except Exception as e:
             self.add_notification(f"保存简历数据失败: {e}", "error")
-    
-    # def check_code_updates(self):
-    #     """检查代码更新"""
-    #     current_hash = self.get_code_hash()
-    #     if self.last_code_hash and current_hash != self.last_code_hash:
-    #         # 触发热更新（不重启，不关闭浏览器）
-    #         try:
-    #             self.reload_code()
-    #             self.add_notification("代码已热更新(无需重启)", "success")
-    #         except Exception as e:
-    #             self.add_notification(f"热更新失败: {e}", "error")
-    #         return True
-    #     self.last_code_hash = current_hash
-    #     return False
-    
-    # def get_code_hash(self):
-    #     """获取代码文件哈希值"""
-    #     hash_md5 = hashlib.md5()
-    #     # 仅监控 src 目录的变更，避免自身文件热更新复杂度
-    #     for root, dirs, files in os.walk("src"):
-    #         for file in files:
-    #             if file.endswith('.py'):
-    #                 filepath = os.path.join(root, file)
-    #                 try:
-    #                     with open(filepath, "rb") as f:
-    #                         hash_md5.update(f.read())
-    #                 except:
-    #                     pass
-    #     return hash_md5.hexdigest()
-    
-
-    # def reload_code(self):
-    #     """热更新配置/工具模块，不关闭浏览器和Flask。"""
-    #     import importlib
-    #     with self.lock:
-    #         # 重新加载配置与工具模块
-    #         try:
-    #             import src.config as cfg_mod
-    #             cfg_mod = importlib.reload(cfg_mod)
-    #             # 更新全局 settings 引用
-    #             globals()['settings'] = cfg_mod.settings
-    #             self.add_notification("配置已热更新", "success")
-    #         except Exception as e:
-    #             self.add_notification(f"配置热更新失败: {e}", "error")
-            
-    #         try:
-    #             import src.utils as utils_mod
-    #             importlib.reload(utils_mod)
-    #             self.add_notification("工具模块已热更新", "success")
-    #         except Exception as e:
-    #             self.add_notification(f"工具模块热更新失败: {e}", "warning")
-            
-    #         try:
-    #             import src.page_selectors as sel_mod
-    #             importlib.reload(sel_mod)
-    #             self.add_notification("选择器模块已热更新", "success")
-    #         except Exception as e:
-    #             self.add_notification(f"选择器模块热更新失败: {e}", "warning")
     
     def _shutdown_thread(self, keep_browser=False):
         """Run graceful shutdown in a separate thread to avoid blocking."""

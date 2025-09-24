@@ -65,3 +65,97 @@ def find_chat_item(page, chat_id: str):
     return None
 
 
+def close_overlay_dialogs(page, add_notification=None, timeout_ms: int = 1000) -> bool:
+    """Close any overlay dialogs that might be blocking the page.
+    
+    Args:
+        page: Playwright page object
+        add_notification: Optional notification callback
+        timeout_ms: Timeout for close operations
+        
+    Returns:
+        bool: True if any overlay was closed, False otherwise
+    """
+    closed_any = False
+    
+    # Close boss-layer__wrapper overlays (like resume dialogs)
+    try:
+        overlay_resume = page.locator("div.boss-layer__wrapper")
+        if overlay_resume.count() > 0:
+            _notify(add_notification, "检测到在线简历对话框，正在关闭", "info")
+            try:
+                # Try the close button first
+                close_btn = page.locator('div.boss-popup__close')
+                if close_btn.count() > 0:
+                    close_btn.click(timeout=timeout_ms)
+                    closed_any = True
+                else:
+                    # Fallback: try clicking outside the dialog
+                    overlay_resume.click(position={"x": 10, "y": 10}, timeout=timeout_ms)
+                    closed_any = True
+            except Exception:
+                pass
+    except Exception:
+        pass
+    
+    # Close other common overlay types
+    overlay_selectors = [
+        "div.boss-popup",
+        "div.popup-overlay", 
+        "div.modal-overlay",
+        "div.dialog-overlay",
+        "[role='dialog']",
+        ".ant-modal-mask",
+        ".el-dialog__wrapper"
+    ]
+    
+    for selector in overlay_selectors:
+        try:
+            overlay = page.locator(selector)
+            if overlay.count() > 0:
+                _notify(add_notification, f"检测到弹出层 {selector}，正在关闭", "info")
+                try:
+                    # Try close button variations
+                    close_selectors = [
+                        f"{selector} .close",
+                        f"{selector} .popup-close", 
+                        f"{selector} .dialog-close",
+                        f"{selector} [aria-label='Close']",
+                        f"{selector} .ant-modal-close",
+                        f"{selector} .el-dialog__close"
+                    ]
+                    
+                    closed = False
+                    for close_sel in close_selectors:
+                        try:
+                            close_btn = page.locator(close_sel)
+                            if close_btn.count() > 0:
+                                close_btn.click(timeout=timeout_ms)
+                                closed = True
+                                break
+                        except Exception:
+                            continue
+                    
+                    if not closed:
+                        # Fallback: press Escape key
+                        page.keyboard.press("Escape")
+                        closed = True
+                    
+                    if closed:
+                        closed_any = True
+                        
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    
+    # Wait a bit for overlays to close
+    if closed_any:
+        try:
+            page.wait_for_timeout(500)
+        except Exception:
+            pass
+    
+    return closed_any
+
+

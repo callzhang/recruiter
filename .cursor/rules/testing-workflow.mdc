@@ -1,0 +1,10 @@
+---
+globs: test/*.py
+---
+# Testing Workflow
+
+- Tests live in [test/](mdc:test/). Use pytest style.
+- Mock external services (OpenAI, DingTalk, HTTP OCR) and Playwright page methods.
+- Prefer small, deterministic unit tests over full browser runs.
+- Add tests when adding endpoints or client commands (e.g., watcher, decision pipeline).
+- Keep fixtures short and inline unless reused across many tests.

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Deep WASM resume debug helper."""
+"""Deep WASM resume debug helper with structured logging."""
+from __future__ import annotations
 
 import argparse
 import json
@@ -7,18 +8,33 @@ import pathlib
 import sys
 import time
 from contextlib import contextmanager
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import Browser, Page, sync_playwright
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.config import settings  # noqa: E402
-from src.resume_capture import _try_open_online_resume, capture_resume_from_chat  # noqa: E402
+from src.resume_capture import (  # noqa: E402
+    _capture_canvas_data_url,
+    _capture_tiled_screenshots,
+    _format_inline_text,
+    _install_canvas_text_hooks,
+    _install_clipboard_hooks,
+    _read_clipboard_logs,
+    _rebuild_text_from_logs,
+    _try_trigger_copy_buttons,
+    _try_wasm_exports,
+    capture_resume_from_chat,
+    prepare_resume_context,
+)
+
+CaptureFn = Callable[[str, Optional[Any]], None]
 
 
-def _safe_preview(payload, limit=2000):
+def _safe_preview(payload: Any, limit: int = 2000) -> str:
     try:
         text = json.dumps(payload, ensure_ascii=False, indent=2)
     except Exception:
@@ -28,7 +44,7 @@ def _safe_preview(payload, limit=2000):
     return text
 
 
-def _print_step(title, payload=None):
+def _print_step(title: str, payload: Optional[Any] = None) -> None:
     print(f"\n=== {title} ===")
     if payload is None:
         return
@@ -39,547 +55,320 @@ def _print_step(title, payload=None):
 
 
 class _StdoutLogger:
-    def info(self, msg):
+    def info(self, msg: str) -> None:
         print(f"[INFO] {msg}")
 
-    def error(self, msg):
+    def error(self, msg: str) -> None:
         print(f"[ERROR] {msg}")
 
-    def warning(self, msg):
-        print(f"[WARN] {msg}")
+    def warning(self, msg: str) -> None:
+        print(f"[WARNING] {msg}")
 
 
 @contextmanager
-def _playwright_connection():
-    pw = sync_playwright().start()
-    browser = None
+def _playwright_connection() -> Iterable[Tuple[Any, Browser]]:
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.connect_over_cdp(settings.CDP_URL)
+        try:
+            yield playwright, browser
+        finally:
+            pass  # 浏览器由外部生命周期管理
+
+
+def _setup_wasm_route(context) -> None:
+    """如果本地存在 wasm 文件，则用它替换远程资源."""
+    local_wasm = ROOT / 'wasm' / 'wasm_canvas-1.0.2-5030.js'
+    if not local_wasm.exists():
+        print("Local wasm_canvas-1.0.2-5030.js not found, skipping route")
+        return
+
+    pattern = r"*wasm_canvas-.*\\.js"
+
+    def _route_resume(route, request):
+        if request.method.upper() != 'GET':
+            return route.continue_()
+        return route.fulfill(
+            path=str(local_wasm),
+            content_type='application/javascript; charset=utf-8',
+        )
+
     try:
-        browser = pw.chromium.connect_over_cdp(settings.CDP_URL)
-        yield pw, browser
-    finally:
-        try:
-            if browser:
-                browser.close()
-        except Exception:
-            pass
-        pw.stop()
+        context.unroute(pattern)
+    except Exception:
+        pass
+    context.route(pattern, _route_resume)
 
 
-def _wait_for_resume_frame(page, timeout=10.0):
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        try:
-            page.wait_for_selector("iframe[src*='c-resume']", timeout=1000)
-        except Exception:
-            pass
-        frame = page.frame(lambda f: f.url and 'c-resume' in f.url)
-        if frame:
-            return frame
-    return None
+def _navigate_to_chat(page: Page, capture: CaptureFn) -> None:
+    if settings.CHAT_URL in (page.url or ''):
+        return
+    try:
+        page.goto(settings.CHAT_URL, wait_until="domcontentloaded", timeout=10000)
+        page.wait_for_load_state("networkidle", timeout=5000)
+    except Exception as err:
+        capture("导航错误", {"error": str(err)})
 
 
-def _step_direct_global(frame):
-    return frame.evaluate(
-        """
-        () => {
-          const info = {
-            hasGlobalGetter: typeof get_export_geek_detail_info === 'function',
-          };
-          if (info.hasGlobalGetter) {
-            try {
-              info.data = get_export_geek_detail_info();
-            } catch (err) {
-              info.error = String(err);
-            }
-          }
-          return info;
+def _get_first_chat_id(page: Page, capture: CaptureFn) -> Optional[str]:
+    try:
+        first_item = page.locator("div.geek-item").first
+        first_item.wait_for(state="visible", timeout=3000)
+        chat_id = first_item.get_attribute("data-id") or first_item.get_attribute("id")
+        capture("获取聊天ID", {"chat_id": chat_id})
+        return chat_id
+    except Exception as err:
+        capture("获取聊天ID失败", {"error": str(err)})
+        return None
+
+
+def _validate_chat_id(page: Page, chat_id: str, capture: CaptureFn) -> bool:
+    """Validate that the provided chat_id exists on the page."""
+    try:
+        # Try to find the chat item with the provided ID
+        chat_item = page.locator(f"div.geek-item[data-id='{chat_id}'], div.geek-item[id='{chat_id}']").first
+        if chat_item.count() > 0:
+            capture("验证聊天ID", {"chat_id": chat_id, "status": "found"})
+            return True
+        else:
+            capture("验证聊天ID", {"chat_id": chat_id, "status": "not_found"})
+            return False
+    except Exception as e:
+        capture("验证聊天ID失败", {"chat_id": chat_id, "error": str(e)})
+        return False
+
+
+def _summarize_inline_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    formatted = snapshot.get('formattedText') or _format_inline_text(snapshot.get('text') or '')
+    preview = formatted[:1000] + ("...<truncated>" if len(formatted) > 1000 else '')
+    long_form = formatted[:20000] + ("...<truncated>" if len(formatted) > 20000 else '')
+    rect = snapshot.get('boundingRect') or {}
+    return {
+        "width": rect.get('width'),
+        "height": rect.get('height'),
+        "textLength": len(formatted),
+        "textPreview": preview,
+        "longText": long_form,
+    }
+
+
+def _run_debug_step(capture: CaptureFn, title: str, runner: Callable[[], Dict[str, Any]]) -> None:
+    try:
+        payload = runner()
+    except Exception as err:
+        payload = {"error": str(err)}
+    capture(title, payload)
+
+
+def _wasm_debug(frame) -> Dict[str, Any]:
+    data = _try_wasm_exports(frame)
+    return {
+        "success": data is not None,
+        "method": "resume_capture._try_wasm_exports",
+        "data": data,
+    }
+
+
+def _canvas_text_debug(frame) -> Dict[str, Any]:
+    hooked = _install_canvas_text_hooks(frame)
+    rebuilt = _rebuild_text_from_logs(frame) if hooked else None
+    return {
+        "hooked": bool(hooked),
+        "rebuilt": rebuilt,
+        "method": "resume_capture._install_canvas_text_hooks + _rebuild_text_from_logs",
+    }
+
+
+def _clipboard_debug(frame) -> Dict[str, Any]:
+    _install_clipboard_hooks(frame)
+    _try_trigger_copy_buttons(frame)
+    clip_text = _read_clipboard_logs(frame)
+    preview = None
+    if clip_text:
+        preview = clip_text[:2000] + ("...<truncated>" if len(clip_text) > 2000 else '')
+    return {
+        "method": "resume_capture._install_clipboard_hooks + _read_clipboard_logs",
+        "has_text": bool(clip_text),
+        "textPreview": preview,
+    }
+
+
+def _summarize_image(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not payload:
+        return {"success": False}
+    summary: Dict[str, Any] = {
+        "success": True,
+        "width": payload.get('width'),
+        "height": payload.get('height'),
+        "details": payload.get('details'),
+    }
+    image_base64 = payload.get('image_base64')
+    images_base64 = payload.get('images_base64')
+    if image_base64:
+        summary['image_base64_length'] = len(image_base64)
+    if images_base64:
+        summary['slice_count'] = len(images_base64)
+        summary['slice_lengths'] = [len(it) for it in images_base64[:3]]
+        if len(images_base64) > 3:
+            summary['slice_lengths'].append('...')
+    return summary
+
+
+def _image_debug(frame, iframe_handle) -> Dict[str, Any]:
+    return {
+        "method": "resume_capture._capture_canvas_data_url/_capture_tiled_screenshots",
+        "canvas": _summarize_image(_capture_canvas_data_url(frame)),
+        "tiled": _summarize_image(_capture_tiled_screenshots(frame, iframe_handle)),
+    }
+
+
+def _process_inline_resume(context_info: Dict[str, Any], capture: CaptureFn) -> None:
+    snapshot = context_info.get('inline') or {}
+    capture("Inline简历快照", _summarize_inline_snapshot(snapshot))
+
+
+def _process_iframe_resume(frame, capture: CaptureFn) -> None:
+    try:
+        frame_meta = {
+            "url": getattr(frame, "url", None),
+            "name": getattr(frame, "name", None),
+            "is_detached": getattr(frame, "is_detached", lambda: None)(),
         }
-        """
+    except Exception:
+        frame_meta = {"repr": repr(frame)}
+    capture("iframe信息", frame_meta)
+
+    iframe_handle = frame.frame_element() if frame else None
+
+    steps: List[Tuple[str, Callable[[], Dict[str, Any]]]] = [
+        ("WASM导出", lambda: _wasm_debug(frame)),
+        ("Canvas文本钩子", lambda: _canvas_text_debug(frame)),
+        ("剪贴板钩子", lambda: _clipboard_debug(frame)),
+        ("截图方法", lambda: _image_debug(frame, iframe_handle)),
+    ]
+
+    for title, runner in steps:
+        _run_debug_step(capture, title, runner)
+
+
+def _final_test(page: Page, chat_id: str, capture: CaptureFn) -> None:
+    logger = _StdoutLogger()
+    for method in ("auto", "wasm", "image"):
+        result = capture_resume_from_chat(page, chat_id, logger=logger, capture_method=method)
+        capture(
+            f"主捕获方法 ({method})",
+            {
+                "success": result.get('success'),
+                "details": result.get('details'),
+                "method": f"resume_capture.capture_resume_from_chat({method})",
+            },
+        )
+
+
+def _save_results(output_path: pathlib.Path, results: List[Dict[str, Any]]) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        output_path.write_text(json.dumps(results, ensure_ascii=False, indent=2))
+        print(f"\n保存调试输出到 {output_path}")
+    except Exception as err:
+        print(f"保存调试输出失败: {err}")
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Deep WASM resume debug helper",
+        epilog="Examples:\n"
+               "  python debug_wasm_export.py                    # Use first available chat\n"
+               "  python debug_wasm_export.py --chat-id abc123   # Test specific chat ID\n"
+               "  python debug_wasm_export.py --final-test       # Run all capture methods",
+        formatter_class=argparse.RawDescriptionHelpFormatter
     )
-
-
-def _step_keyword_scan(frame, keywords=None):
-    keywords = keywords or ['wasm', 'resume', 'geek', 'canvas', 'export']
-    return frame.evaluate(
-        """
-        (patterns) => {
-          const response = { allKeysCount: 0, sampledKeys: [], matches: [] };
-          try {
-            const lowerPatterns = (patterns || []).map((p) => String(p).toLowerCase());
-            const keys = Object.getOwnPropertyNames(window || {});
-            response.allKeysCount = keys.length;
-            response.sampledKeys = keys.slice(0, 50);
-            const matches = [];
-            for (const key of keys) {
-              const lower = key.toLowerCase();
-              if (lowerPatterns.some((pat) => lower.includes(pat))) {
-                let value;
-                try {
-                  value = window[key];
-                } catch (_) {
-                  continue;
-                }
-                matches.push({
-                  key,
-                  type: typeof value,
-                  tag: Object.prototype.toString.call(value)
-                });
-              }
-            }
-            matches.sort((a, b) => a.key.localeCompare(b.key));
-            response.matches = matches.slice(0, 200);
-          } catch (err) {
-            response.error = String(err);
-          }
-          return response;
-        }
-        """,
-        keywords,
+    parser.add_argument(
+        "--output",
+        default=str((ROOT / 'scripts' / 'debug_wasm_export_output.json').resolve()),
+        help="Path for JSON output",
     )
-
-
-def _step_window_modules(frame):
-    return frame.evaluate(
-        """
-        () => {
-          const hits = [];
-          for (const key of Object.getOwnPropertyNames(window || {})) {
-            let val;
-            try {
-              val = window[key];
-            } catch (_) {
-              continue;
-            }
-            if (!val || (typeof val !== 'object' && typeof val !== 'function')) continue;
-            const hasRegister = typeof val.register_js_callback === 'function';
-            const hasTrigger = typeof val.trigger_rust_callback === 'function';
-            const hasGetter = typeof val.get_export_geek_detail_info === 'function';
-            if (hasRegister || hasTrigger || hasGetter) {
-              hits.push({ key, hasRegister, hasTrigger, hasGetter, type: Object.prototype.toString.call(val) });
-            }
-          }
-          hits.sort((a, b) => a.key.localeCompare(b.key));
-          return hits;
-        }
-        """
+    parser.add_argument("--wait", type=float, default=0.0, help="Seconds to sleep before finishing")
+    parser.add_argument(
+        "--final-test",
+        action="store_true",
+        help="Run capture_resume_from_chat for all modes at the end",
     )
-
-
-def _step_probe_module(frame, key):
-    return frame.evaluate(
-        """
-        async (moduleKey) => {
-          const outcome = { moduleKey };
-          try {
-            const mod = window[moduleKey];
-            if (!mod) {
-              outcome.missing = true;
-              return outcome;
-            }
-            outcome.type = Object.prototype.toString.call(mod);
-
-            try {
-              if (typeof mod.default === 'function') {
-                await mod.default();
-                outcome.defaultInvoked = true;
-              }
-            } catch (err) {
-              outcome.defaultError = String(err);
-            }
-
-            const store = (window.__resume_data_store = window.__resume_data_store || {});
-
-            if (typeof mod.register_js_callback === 'function') {
-              try {
-                mod.register_js_callback('export_geek_detail_info', (d) => { store.export_geek_detail_info = d; });
-                mod.register_js_callback('geek_detail_info', (d) => { store.geek_detail_info = d; });
-                outcome.callbacksRegistered = true;
-              } catch (err) {
-                outcome.callbackError = String(err);
-              }
-            }
-
-            if (typeof mod.get_export_geek_detail_info === 'function') {
-              try {
-                outcome.direct = mod.get_export_geek_detail_info();
-              } catch (err) {
-                outcome.directError = String(err);
-              }
-            }
-
-            const triggerPayloads = [undefined, null, '', 'null', '{}', '[]', { force: true }, []];
-            const triggerNames = [
-              'export_geek_detail_info',
-              'geek_detail_info',
-              'export_resume_detail_info',
-              'resume_detail',
-              'geek_detail',
-            ];
-
-            if (typeof mod.trigger_rust_callback === 'function') {
-              outcome.triggerAttempts = [];
-              for (const name of triggerNames) {
-                for (const payload of triggerPayloads) {
-                  try {
-                    const result = mod.trigger_rust_callback(name, payload);
-                    outcome.triggerAttempts.push({ name, payloadDescription: typeof payload, ok: true, result });
-                  } catch (err) {
-                    outcome.triggerAttempts.push({ name, payloadDescription: typeof payload, error: String(err) });
-                  }
-                }
-              }
-            }
-
-            await new Promise((resolve) => setTimeout(resolve, 50));
-            const dataStore = store.export_geek_detail_info || store.geek_detail_info;
-            if (dataStore) {
-              outcome.store = dataStore;
-            }
-          } catch (err) {
-            outcome.error = String(err);
-          }
-          return outcome;
-        }
-        """,
-        key,
+    parser.add_argument(
+        "--chat-id",
+        type=str,
+        help="Specific chat ID to test (if not provided, will use the first available chat)",
     )
-
-
-def _step_collect_resources(frame):
-    return frame.evaluate(
-        """
-        () => {
-          const scripts = Array.from(document.querySelectorAll('script[src]')).map((s) => s.src);
-          const modulePreloads = Array.from(document.querySelectorAll("link[rel='modulepreload'][href]")).map((l) => l.href);
-          return { scripts, modulePreloads };
-        }
-        """
-    )
-
-
-def _derive_candidate_urls(resource_info):
-    candidates = set()
-    for url in resource_info.get('scripts', []):
-        if not url:
-            continue
-        lower = url.lower()
-        if 'wasm' in lower and 'canvas' in lower and lower.endswith('.js'):
-            candidates.add(url)
-        elif lower.endswith('.js') and 'index' in lower:
-            base = url.rsplit('/', 1)[0]
-            candidates.add(f"{base}/wasm_canvas-1.0.2-5030.js")
-    for url in resource_info.get('modulePreloads', []):
-        if not url:
-            continue
-        lower = url.lower()
-        if 'wasm' in lower and 'canvas' in lower:
-            candidates.add(url)
-    version = '1.0.2-5030'
-    candidates.add(f"https://static.zhipin.com/assets/zhipin/wasm/resume/wasm_canvas-{version}.js")
-    candidates.add(f"https://static.zhipin.com/zhipin-boss/wasm-resume-container/v134/assets/wasm_canvas-{version}.js")
-    return sorted(candidates)
-
-
-def _step_import_module(frame, url):
-    return frame.evaluate(
-        """
-        async (moduleUrl) => {
-          const outcome = { moduleUrl };
-          try {
-            const mod = await import(moduleUrl);
-            outcome.imported = true;
-            outcome.keys = Object.keys(mod || {});
-            if (typeof mod.default === 'function') {
-              try {
-                await mod.default();
-                outcome.defaultInvoked = true;
-              } catch (err) {
-                outcome.defaultError = String(err);
-              }
-            }
-            if (mod && typeof mod.register_js_callback === 'function') {
-              const store = (window.__resume_data_store = window.__resume_data_store || {});
-              try {
-                mod.register_js_callback('export_geek_detail_info', (d) => { store.export_geek_detail_info = d; });
-                mod.register_js_callback('geek_detail_info', (d) => { store.geek_detail_info = d; });
-                outcome.callbacksRegistered = true;
-              } catch (err) {
-                outcome.callbackError = String(err);
-              }
-            }
-            if (mod && typeof mod.get_export_geek_detail_info === 'function') {
-              try {
-                outcome.direct = mod.get_export_geek_detail_info();
-              } catch (err) {
-                outcome.directError = String(err);
-              }
-            }
-            const triggerPayloads = [undefined, null, '', 'null', '{}', '[]', { force: true }, []];
-            const triggerNames = [
-              'export_geek_detail_info',
-              'geek_detail_info',
-              'export_resume_detail_info',
-              'resume_detail',
-              'geek_detail',
-            ];
-
-            if (mod && typeof mod.trigger_rust_callback === 'function') {
-              outcome.triggerAttempts = [];
-              for (const name of triggerNames) {
-                for (const payload of triggerPayloads) {
-                  try {
-                    const result = mod.trigger_rust_callback(name, payload);
-                    outcome.triggerAttempts.push({ name, payloadDescription: typeof payload, ok: true, result });
-                  } catch (err) {
-                    outcome.triggerAttempts.push({ name, payloadDescription: typeof payload, error: String(err) });
-                  }
-                }
-              }
-            }
-            await new Promise((resolve) => setTimeout(resolve, 50));
-            const store = window.__resume_data_store || {};
-            const dataStore = store.export_geek_detail_info || store.geek_detail_info;
-            if (dataStore) {
-              outcome.store = dataStore;
-            }
-          } catch (err) {
-            outcome.error = String(err);
-          }
-          return outcome;
-        }
-        """,
-        url,
-    )
-
-
-def _step_fetch_script_snippet(frame, url, limit=2000):
-    return frame.evaluate(
-        """
-        async ({ targetUrl, sizeLimit }) => {
-          try {
-            const res = await fetch(targetUrl, { credentials: 'include' });
-            const text = await res.text();
-            return {
-              ok: res.ok,
-              status: res.status,
-              length: text.length,
-              snippet: text.slice(0, sizeLimit)
-            };
-          } catch (err) {
-            return { error: String(err) };
-          }
-        }
-        """,
-        { "targetUrl": url, "sizeLimit": limit },
-    )
-
-
-def _step_fetch_store(frame):
-    return frame.evaluate(
-        """
-        () => {
-          const store = window.__resume_data_store || null;
-          return {
-            hasStore: !!store,
-            exportKeys: store ? Object.keys(store || {}) : [],
-            data: store,
-          };
-        }
-        """
-    )
-
-
-def _step_other_fields(frame):
-    return frame.evaluate(
-        """
-        () => {
-          const out = {};
-          try {
-            const node = document.querySelector('[data-props]');
-            if (node) {
-              const raw = node.getAttribute('data-props');
-              if (raw) {
-                try {
-                  out.dataProps = JSON.parse(raw);
-                } catch (err) {
-                  out.dataPropsError = String(err);
-                }
-              }
-            }
-          } catch (err) {
-            out.dataPropsError = String(err);
-          }
-          try {
-            const state = window.__INITIAL_STATE__;
-            if (state) {
-              out.initialStateKeys = Object.keys(state || {});
-              if (state.resume) {
-                out.initialResume = state.resume;
-              } else if (state.geekDetail) {
-                out.initialResume = state.geekDetail;
-              }
-            }
-          } catch (err) {
-            out.initialStateError = String(err);
-          }
-          return out;
-        }
-        """
-    )
-
-
-def _parse_args():
-    parser = argparse.ArgumentParser(description="Deep WASM resume debug helper")
-    parser.add_argument("--output", default=str((ROOT / 'scripts' / 'debug_wasm_export_output.json').resolve()), help="Path for JSON output")
-    parser.add_argument("--wait", type=float, default=0.0, help="Seconds to sleep before capture (manual prep)")
     return parser.parse_args()
 
 
-def main():
+def main() -> None:
     args = _parse_args()
-    results = []
+    results: List[Dict[str, Any]] = []
+    start = time.time()
 
-    def capture(title, payload=None):
-        record = {"title": title, "payload": payload}
+    def capture(title: str, payload: Optional[Any] = None) -> None:
+        elapsed = time.time() - start
+        record = {"title": title, "payload": payload, "elapsed": elapsed}
         results.append(record)
-        _print_step(title, payload)
+        _print_step(f"{title} (t+{elapsed:.2f}s)", payload)
 
-    with _playwright_connection() as (pw, browser):
-        context = browser.contexts[0] if browser.contexts else None
-        if not context:
-            print("No active context found. Ensure the external browser exposed over CDP is running.")
-            sys.exit(1)
+    with _playwright_connection() as (_, browser):
+        context = browser.contexts[0] if browser.contexts else browser.new_context()
+        page = context.pages[0] if context.pages else context.new_page()
 
-        pages = context.pages
-        if not pages:
-            print("No open pages detected in the connected browser.")
-            sys.exit(1)
+        _setup_wasm_route(context)
+        _navigate_to_chat(page, capture)
 
-        local_wasm = ROOT / 'wasm' / 'wasm_canvas-1.0.2-5030.js'
-        if local_wasm.exists():
-            def _route_resume(route, request):
-                if request.method.upper() != 'GET':
-                    return route.continue_()
-                return route.fulfill(path=str(local_wasm), content_type='application/javascript; charset=utf-8')
-
-            pattern = r"*wasm_canvas-.*\.js"
-            context.unroute(pattern)
-            context.route(pattern, _route_resume)
+        # Use provided chat_id or get the first available one
+        if args.chat_id:
+            chat_id = args.chat_id
+            capture("使用提供的聊天ID", {"chat_id": chat_id})
+            # Validate that the provided chat_id exists
+            if not _validate_chat_id(page, chat_id, capture):
+                capture("错误", {"message": f"提供的聊天ID '{chat_id}' 在页面上未找到"})
+                _save_results(pathlib.Path(args.output), results)
+                return
         else:
-            print("Local wasm_canvas-1.0.2-5030.js not found. Skipping route.")
+            chat_id = _get_first_chat_id(page, capture)
+            if not chat_id:
+                _save_results(pathlib.Path(args.output), results)
+                return
 
-        page = pages[0]
-        try:
-            current_url = page.url or ''
-        except Exception:
-            current_url = ''
-        if settings.CHAT_URL not in current_url:
-            try:
-                page.goto(settings.CHAT_URL, wait_until="domcontentloaded", timeout=10000)
-                try:
-                    page.wait_for_load_state("networkidle", timeout=5000)
-                except Exception:
-                    pass
-            except Exception as nav_err:
-                capture("Step 0: navigation", {"error": str(nav_err)})
+        context_info = prepare_resume_context(
+            page,
+            chat_id,
+            _StdoutLogger(),
+            total_timeout=12000,
+            inline_html_limit=20000,
+        )
 
-        fallback_info = {"used": False}
-        try:
-            first_item = page.locator("div.geek-item").first
-            first_item.wait_for(state="visible", timeout=3000)
-            fallback_info["itemId"] = first_item.get_attribute("data-id") or first_item.get_attribute("id")
-            first_item.click()
-            try:
-                page.wait_for_timeout(300)
-            except Exception:
-                pass
-            btn = page.locator("a.resume-btn-online").first
-            btn.wait_for(state="visible", timeout=3000)
-            btn.click()
-            fallback_info.update({"used": True, "details": "Opened first chat item"})
-        except Exception as fallback_err:
-            fallback_info.update({"error": str(fallback_err)})
-        capture("Step 0: open resume", fallback_info)
-
-        frame = None
-        for _ in range(3):
-            frame = _wait_for_resume_frame(page, timeout=10.0)
-            if frame:
-                break
-            try:
-                page.wait_for_timeout(500)
-            except Exception:
-                pass
-        if not frame:
-            print("Unable to locate resume iframe automatically. Please open the resume manually in the connected browser and re-run.")
+        if not context_info or not context_info.get('success'):
+            capture(
+                "简历获取失败",
+                {
+                    "error": (context_info or {}).get('details') or '未找到简历内容',
+                    "mode": (context_info or {}).get('mode'),
+                },
+            )
+            _save_results(pathlib.Path(args.output), results)
             return
 
-        capture("Step 1: Direct global getter", _step_direct_global(frame))
-        capture("Step 1b: Keyword window scan", _step_keyword_scan(frame))
-
-        module_hits = _step_window_modules(frame)
-        capture("Step 2: window module candidates", module_hits)
-
-        for idx, hit in enumerate(module_hits):
-            if idx >= 10:
-                print("...skipping remaining module candidates for brevity")
-                break
-            outcome = _step_probe_module(frame, hit['key'])
-            capture(f"Step 3.{idx+1}: probe window.{hit['key']}", outcome)
-            if outcome.get('store') or outcome.get('direct'):
-                break
-
-        resource_info = _step_collect_resources(frame)
-        capture("Step 4: collected script resources", resource_info)
-
-        candidate_urls = _derive_candidate_urls(resource_info)
-        capture("Step 5: derived candidate module URLs", candidate_urls)
-
-        for url in candidate_urls[:6]:
-            frame = _wait_for_resume_frame(page)
+        if context_info.get('mode') == 'inline':
+            _process_inline_resume(context_info, capture)
+        else:
+            frame = context_info.get('frame')
             if not frame:
-                capture(f"Step 5b: fetch snippet {url}", {"error": "resume iframe detached"})
-                break
-            try:
-                capture(f"Step 5b: fetch snippet {url}", _step_fetch_script_snippet(frame, url))
-            except Exception as err:
-                capture(f"Step 5b: fetch snippet {url}", {"error": str(err)})
-                frame = _wait_for_resume_frame(page)
-                if not frame:
-                    break
-            try:
-                outcome = _step_import_module(frame, url)
-            except Exception as err:
-                frame = _wait_for_resume_frame(page)
-                if not frame:
-                    capture(f"Step 6: import {url}", {"error": "resume iframe detached"})
-                    break
-                outcome = {"error": str(err)}
-            capture(f"Step 6: import {url}", outcome)
-            if outcome.get('store') or outcome.get('direct'):
-                break
-
-        frame = _wait_for_resume_frame(page)
-        if not frame:
-            capture("Step 6b: other fields", {"error": "resume iframe detached"})
-            return
-        capture("Step 6b: other fields", _step_other_fields(frame))
-
-        store_snapshot = _step_fetch_store(frame)
-        capture("Final store snapshot", store_snapshot)
+                capture("iframe错误", {"error": "iframe frame missing"})
+            else:
+                _process_iframe_resume(frame, capture)
 
         if args.wait > 0:
             time.sleep(args.wait)
 
-        capture("capture_resume_from_chat", capture_resume_from_chat(page, args.chat_id, logger=_StdoutLogger()))
+        if args.final_test:
+            _final_test(page, chat_id, capture)
 
-    output_path = pathlib.Path(args.output)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        output_path.write_text(json.dumps(results, ensure_ascii=False, indent=2))
-        print(f"\nSaved detailed debug output to {output_path}")
-    except Exception as err:
-        print(f"Failed to write debug output: {err}")
+    _save_results(pathlib.Path(args.output), results)
 
 
 if __name__ == "__main__":

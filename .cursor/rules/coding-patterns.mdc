@@ -1,0 +1,30 @@
+---
+globs: *.py
+---
+# FastAPI + Playwright Coding Patterns
+
+Login & Session:
+- Use CDP attach via config in [src/config.py](mdc:src/config.py). No local launch fallback.
+- Use `ensure_login()` lazily inside endpoints that need it. Avoid global middleware to reduce races.
+- Prefer Playwright locator auto-waits over `time.sleep()`; use `wait_for_selector`/`wait_for_function` and `networkidle` appropriately.
+
+Browser/Page:
+- Keep a single shared `context` and `page` in [boss_service.py](mdc:boss_service.py) guarded via locks.
+- On session checks, if `page` is missing/closed, reuse an existing page or create a new one and navigate to `CHAT_URL`.
+- For DOM extraction, prefer single-pass snapshots and robust selectors in [src/page_selectors.py](mdc:src/page_selectors.py).
+
+Events & Caching:
+- Listen to `context.on('response')` for chat data; only parse JSON with small size and json content-type; add TTL to cache.
+- Store cache entries keyed by `chat_id` as strings.
+
+Resume Extraction:
+- Prefer `canvas.toDataURL('image/png')` from inside the resume iframe.
+- If needed, open iframe URL in a new tab and use `toDataURL` or `full_page=True` screenshot as fallback.
+- Hook both `fillText` and `strokeText` for text capture; group by y-buckets.
+
+API & Errors:
+- Use JSONResponse with consistent shape; consider HTTP status codes for auth/timeouts.
+- Avoid long blocking waits inside request handlers; fail fast and log.
+
+Testing:
+- Add tests under [test/](mdc:test/). Mock network and OCR for deterministic behavior.

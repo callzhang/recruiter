@@ -1,0 +1,22 @@
+---
+alwaysApply: true
+---
+# Project Structure and Working Agreements
+
+- Primary service is [boss_service.py](mdc:boss_service.py) exposing FastAPI app `app` and encapsulating Playwright lifecycle.
+- Client CLI and SDK is [boss_client.py](mdc:boss_client.py).
+- Service launcher is [start_service.py](mdc:start_service.py) (launches external Chrome with CDP and uvicorn --reload).
+- Key docs to read/maintain each session:
+  - Architecture: [docs/architecture.mermaid](mdc:docs/architecture.mermaid)
+  - Technical specs: [docs/technical.md](mdc:docs/technical.md)
+  - Tasks: [tasks/tasks.md](mdc:tasks/tasks.md)
+  - Status: [docs/status.md](mdc:docs/status.md)
+  - Changelog: [changelog.md](mdc:changelog.md)
+- Configuration lives in [src/config.py](mdc:src/config.py) and support modules under [src/](mdc:src/).
+- Tests live under [test/](mdc:test/).
+- Demo and ops notebook is [command.ipynb](mdc:command.ipynb).
+
+Conventions:
+- Edit existing files unless a new module is clearly justified.
+- Use absolute paths when referencing files in tools where possible.
+- After implementing features, update status and add tests.

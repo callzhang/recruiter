@@ -24,6 +24,26 @@ import base64
 from textwrap import dedent
 from typing import Any, Dict, Optional
 
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+
+INLINE_RESUME_SELECTORS = [
+    '.resume-box',
+    '.resume-content-wrap',
+    '.new-resume-online-main-ui',
+]
+
+INLINE_SECTION_HEADINGS = [
+    '期望职位',
+    '工作经历',
+    '项目经验',
+    '教育经历',
+    '教育经理',
+    '资格证书',
+    '技能标签',
+    '自我评价',
+]
+
 
 CANVAS_TEXT_HOOK_SCRIPT = dedent("""
 (function(){
@@ -151,21 +171,157 @@ def _log(logger, level: str, message: str) -> None:
         pass
 
 
+def _format_inline_text(text: str) -> str:
+    if not text:
+        return ''
+    
+    # 过滤保护文本
+    protection_texts = [
+        "为妥善保护牛人在BOSS直聘平台提交、发布、展示的简历",
+        "包括但不限于在线简历、附件简历",
+        "包括但不限于联系方式、期望职位、教育经历、工作经历等",
+        "任何用户原则上仅可出于自身招聘的目的",
+        "通过BOSS直聘平台在线浏览牛人简历",
+        "未经BOSS直聘及牛人本人书面授权",
+        "任何用户不得将牛人在BOSS直聘平台提交、发布、展示的简历中的个人信息",
+        "在任何第三方平台进行复制、使用、传播、存储",
+        "BOSS直聘平台",
+        "个人信息"
+    ]
+    
+    lines = text.splitlines()
+    output = []
+    for raw in lines:
+        trimmed = raw.strip()
+        
+        # 跳过保护文本
+        if trimmed and any(protection_text in trimmed for protection_text in protection_texts):
+            continue
+            
+        if trimmed and any(trimmed.startswith(h) for h in INLINE_SECTION_HEADINGS):
+            output.append('')
+            output.append(trimmed)
+            output.append('---')
+        else:
+            output.append(raw)
+    
+    while output and output[-1] == '':
+        output.pop()
+    formatted = "\n".join(output)
+    while "\n\n\n" in formatted:
+        formatted = formatted.replace("\n\n\n", "\n\n")
+    return formatted.strip("\n")
+
+
+def _snapshot_inline_resume(page) -> Optional[Dict[str, Any]]:
+    try:
+        return page.evaluate(
+            """
+            ({ selectors }) => {
+              const list = Array.isArray(selectors) ? selectors : [];
+              let target = null;
+              for (const sel of list) {
+                const node = document.querySelector(sel);
+                if (node) { target = node; break; }
+              }
+              if (!target) return null;
+              const rect = target.getBoundingClientRect();
+              const closestData = target.closest('[data-props]') || document.querySelector('[data-props]');
+              const html = target.innerHTML || '';
+              const text = target.innerText || '';
+              const dataProps = closestData ? (closestData.getAttribute('data-props') || '') : '';
+              const hasResumeItem = !!target.querySelector('.resume-item');
+              const hasSectionTitle = !!target.querySelector('.section-title');
+              return {
+                mode: 'inline',
+                selector: target.tagName ? target.tagName.toLowerCase() : null,
+                classList: Array.from(target.classList || []),
+                childCount: target.childElementCount || 0,
+                canvasCount: target.querySelectorAll ? target.querySelectorAll('canvas').length : 0,
+                htmlLength: html.length,
+                html,
+                text,
+                dataProps,
+                textLength: text.length,
+                dataPropsLength: dataProps.length,
+                hasResumeItem,
+                hasSectionTitle,
+                boundingRect: {
+                  x: rect.x,
+                  y: rect.y,
+                  width: rect.width,
+                  height: rect.height,
+                  top: rect.top,
+                  left: rect.left,
+                  bottom: rect.bottom,
+                  right: rect.right,
+                }
+              };
+            }
+            """,
+            {"selectors": INLINE_RESUME_SELECTORS},
+        )
+    except Exception:
+        return None
+
+
+def _inline_snapshot_has_content(snapshot: Optional[Dict[str, Any]]) -> bool:
+    if not snapshot:
+        return False
+    text = (snapshot.get('text') or '').strip()
+    if text:
+        return True
+    data_props = (snapshot.get('dataProps') or '').strip()
+    if data_props:
+        return True
+    if snapshot.get('hasResumeItem') or snapshot.get('hasSectionTitle'):
+        return True
+    return False
+
+
+def _extract_inline_snapshot(snapshot: Dict[str, Any], html_limit: int = 0) -> Dict[str, Any]:
+    result = dict(snapshot or {})
+    text = result.get('text') or ''
+    formatted = _format_inline_text(text)
+    result['formattedText'] = formatted or text
+    trimmed = result['formattedText'] or ''
+    snippet = trimmed[:1000]
+    if trimmed and len(trimmed) > 1000:
+        snippet += '...<truncated>'
+    result['textSnippet'] = snippet
+
+    html_content = result.get('html') or ''
+    if html_limit and html_limit > 0 and len(html_content) > html_limit:
+        result['htmlSnippet'] = html_content[:html_limit] + '...<truncated>'
+    else:
+        result['htmlSnippet'] = html_content
+    return result
+
+
+def _capture_inline_resume(
+    page,
+    logger=None,
+    html_limit: int = 0,
+    *,
+    max_attempts: int = 10,
+) -> Optional[Dict[str, Any]]:
+    for _ in range(max_attempts):
+        snapshot = _snapshot_inline_resume(page)
+        if _inline_snapshot_has_content(snapshot):
+            return _extract_inline_snapshot(snapshot, html_limit)
+        time.sleep(0.25)
+    return None
+
+
 def _try_open_online_resume(page, chat_id: str, logger=None) -> Dict[str, Any]:
     """Open the target chat and click the online resume button.
     Returns { success, details } and leaves the UI on the online resume dialog.
     """
     # Close existing overlay if present
-    try:
-        overlay_resume = page.locator("div.boss-layer__wrapper")
-        if overlay_resume.count() > 0:
-            _log(logger, "info", "已有在线简历对话框遮挡，关闭它")
-            try:
-                page.locator('div.boss-popup__close').click(timeout=1000)
-            except Exception:
-                pass
-    except Exception:
-        pass
+    from .chat_utils import close_overlay_dialogs
+    closed = close_overlay_dialogs(page, add_notification=lambda msg, level: _log(logger, level, msg))
+    if closed:
+        _log(logger, "info", "已关闭遮挡的弹出层")
 
     # Focus the chat item
     target = None
@@ -203,17 +359,100 @@ def _try_open_online_resume(page, chat_id: str, logger=None) -> Dict[str, Any]:
     return { 'success': True, 'details': '已打开在线简历' }
 
 
-def _get_resume_frame(page, logger=None):
-    """Wait and return (iframe_element_handle, frame) for resume viewer."""
+
+def _wait_for_resume_entry(page, timeout_ms: int, logger=None) -> Dict[str, Any]:
+    selector = (
+        "iframe[src*='c-resume'], "
+        ".resume-box"
+    )
     try:
-        t0 = time.time()
-        iframe_handle = page.wait_for_selector("iframe[src*='c-resume']")
-        _log(logger, "info", f"iframe[src*='c-resume'] time: {time.time() - t0}")
-        frame = page.frame(url=re.compile(r"/c-resume"))
-        return iframe_handle, frame
-    except Exception as e:
-        _log(logger, "error", f"查找简历iframe失败: {e}")
-        return None, None
+        handle = page.wait_for_selector(selector, timeout=timeout_ms)
+    except PlaywrightTimeoutError:
+        return {'mode': None}
+
+    tag = handle.evaluate("el => el.tagName.toLowerCase()")
+    if tag == 'iframe':
+        frame = handle.content_frame() or page.frame(url=re.compile(r"/c-resume"))
+        return {
+            'mode': 'iframe',
+            'iframe_handle': handle,
+            'frame': frame,
+        }
+
+    return {
+        'mode': 'inline',
+    }
+
+
+def _frame_is_usable(frame: Optional[Any]) -> bool:
+    return frame is not None and not frame.is_detached()
+
+
+def _get_resume_frame(page, logger=None, timeout_ms: int = 10000):
+    start = time.time()
+    entry = _wait_for_resume_entry(page, timeout_ms, logger)
+    if entry.get('mode') == 'iframe' and _frame_is_usable(entry.get('frame')):
+        _log(logger, "info", f"iframe[src*='c-resume'] time: {time.time() - start}")
+        return entry.get('iframe_handle'), entry.get('frame')
+    return None, None
+
+
+def prepare_resume_context(
+    page,
+    chat_id: str,
+    logger=None,
+    *,
+    total_timeout: float = 12000,
+    inline_html_limit: int = 20000,
+) -> Dict[str, Any]:
+    """Prepare resume context by opening resume and detecting mode.
+
+    This is a high-level orchestrator that coordinates the resume preparation process.
+    """
+    open_result = _try_open_online_resume(page, chat_id, logger)
+    if not open_result.get('success'):
+        return _create_error_result(open_result, '无法打开在线简历')
+
+    entry = _wait_for_resume_entry(page, total_timeout, logger)
+    mode = entry.get('mode')
+
+    if mode == 'inline':
+        inline_snapshot = _capture_inline_resume(
+            page,
+            logger,
+            html_limit=inline_html_limit,
+            max_attempts=5,
+        )
+        return {
+            'success': True,
+            'mode': 'inline',
+            'inline': inline_snapshot,
+            'openResult': open_result,
+        }
+
+    if mode == 'iframe':
+        frame = entry.get('frame')
+        if _frame_is_usable(frame):
+            return {
+                'success': True,
+                'mode': 'iframe',
+                'frame': frame,
+                'iframe_handle': entry.get('iframe_handle'),
+                'openResult': open_result,
+            }
+        return _create_error_result(open_result, 'iframe不可用')
+
+    return _create_error_result(open_result, '未找到简历iframe或inline内容')
+
+
+def _create_error_result(open_result: Dict[str, Any], details: str) -> Dict[str, Any]:
+    """Create a standardized error result."""
+    return {
+        'success': False,
+        'mode': None,
+        'details': details,
+        'openResult': open_result,
+    }
 
 
 def _try_wasm_exports(frame, logger=None) -> Optional[Dict[str, Any]]:
@@ -222,6 +461,7 @@ def _try_wasm_exports(frame, logger=None) -> Optional[Dict[str, Any]]:
     """
     if frame is None:
         return None
+    payload = None
     try:
         payload = frame.evaluate(
             """
@@ -893,143 +1133,258 @@ def _element_screenshot_fallback(page, frame, logger=None) -> Optional[Dict[str,
 
 
 def capture_resume_from_chat(page, chat_id: str, logger=None, capture_method: str = "auto") -> Dict[str, Any]:
-    """High-level method used by the service: returns a dict with keys:
-    - success: bool
-    - text/html or image_base64/data_url
-    - width/height
-    - details
+    """Main resume capture function - orchestrates the capture process.
     
     Args:
         page: Playwright page object
         chat_id: Chat ID to capture resume from
         logger: Optional logger for debug info
-        capture_method: Method to use for capture. Options:
-            - "auto" (default): Try all methods in optimal order
-            - "wasm": Only try WASM export methods
-            - "image": Skip text methods, only use screenshot methods
+        capture_method: Method to use for capture ("auto", "wasm", "image")
     """
     try:
-        # Validate capture_method parameter
-        valid_methods = ["auto", "wasm", "image"]
-        if capture_method not in valid_methods:
-            return { 'success': False, 'details': f'无效的capture_method: {capture_method}，必须是: {valid_methods}' }
+        # Step 1: Validate parameters
+        validation_result = _validate_capture_parameters(capture_method, logger)
+        if not validation_result['valid']:
+            return validation_result['result']
 
-        if logger:
-            logger.info(f"使用捕获方法: {capture_method}")
-
-        # 1) open online resume UI
-        open_ret = _try_open_online_resume(page, chat_id, logger)
-        if not open_ret.get('success'):
-            return { 'success': False, 'details': open_ret.get('details') or '无法打开在线简历' }
-
-        # 2) locate iframe and frame
-        iframe_handle, frame = _get_resume_frame(page, logger)
-        if frame is None:
-            return { 'success': False, 'details': '未找到简历iframe' }
-
-        # 3) WASM exports (if enabled)
-        if capture_method in ["auto", "wasm"]:
-            wasm_obj = _try_wasm_exports(frame, logger)
-            if wasm_obj is not None:
-                try:
-                    import json as _json
-                    text_dump = _json.dumps(wasm_obj, ensure_ascii=False, indent=2)
-                except Exception:
-                    text_dump = str(wasm_obj)
-                return {
-                    'success': True,
-                    'text': text_dump,
-                    'html': None,
-                    'width': 0,
-                    'height': 0,
-                    'details': f'来自WASM导出(get_export_geek_detail_info) - 方法:{capture_method}'
-                }
-            
-            # If wasm method is specifically requested but failed
-            if capture_method == "wasm":
-                return { 'success': False, 'details': 'WASM方法失败，未找到可用的导出函数' }
-
-        # 4) Install canvas hooks and rebuild text (auto mode only)
-        if capture_method == "auto":
-            hooked = _install_canvas_text_hooks(frame, logger)
-            if hooked:
-                rebuilt = _rebuild_text_from_logs(frame, logger)
-                if isinstance(rebuilt, dict) and (rebuilt.get('text') or rebuilt.get('html')):
-                    return {
-                        'success': True,
-                        'text': (rebuilt.get('text') or '') or None,
-                        'html': (rebuilt.get('html') or '') or None,
-                        'width': 0,
-                        'height': 0,
-                        'details': f"来自canvas拦截，lines={rebuilt.get('lineCount')}, items={rebuilt.get('itemCount')} - 方法:auto"
-                    }
-
-        # 5) Clipboard interception path (auto mode only)
-        if capture_method == "auto":
-            _install_clipboard_hooks(frame, logger)
-            _try_trigger_copy_buttons(frame, logger)
-            clip_text = _read_clipboard_logs(frame, logger)
-            if clip_text:
-                return {
-                    'success': True,
-                    'text': clip_text,
-                    'html': None,
-                    'width': 0,
-                    'height': 0,
-                    'details': '来自剪贴板拦截(copy/导出) - 方法:auto'
-                }
-
-        # 6) Canvas data URL capture (auto and image modes)
-        if capture_method in ["auto", "image"]:
-            data_url_ret = _capture_canvas_data_url(frame, logger)
-            if data_url_ret is not None:
-                data_url_ret.update({ 
-                    'success': True, 
-                    'text': None, 
-                    'html': None,
-                    'details': f"{data_url_ret.get('details', 'Canvas toDataURL')} - 方法:{capture_method}"
-                })
-                return data_url_ret
-
-        # 7) Tiled screenshots in iframe (auto and image modes)
-        if capture_method in ["auto", "image"]:
-            tiled_ret = _capture_tiled_screenshots(frame, iframe_handle, logger)
-            if tiled_ret is not None:
-                tiled_ret.update({ 
-                    'success': True, 
-                    'text': None, 
-                    'html': None,
-                    'details': f"{tiled_ret.get('details', '平铺截图')} - 方法:{capture_method}"
-                })
-                return tiled_ret
-
-        # 8) Element screenshot fallback (auto and image modes)
-        if capture_method in ["auto", "image"]:
-            elem_ret = _element_screenshot_fallback(page, frame, logger)
-            if elem_ret is not None:
-                elem_ret.update({ 
-                    'success': True, 
-                    'text': None, 
-                    'html': None,
-                    'details': f"{elem_ret.get('details', '元素截图')} - 方法:{capture_method}"
-                })
-                return elem_ret
-
-        # Specific error message based on capture method
-        if capture_method == "wasm":
-            return { 'success': False, 'details': 'WASM方法失败' }
-        elif capture_method == "image":
-            return { 'success': False, 'details': '所有截图方法均失败' }
+        # Step 2: Get resume context
+        context_info = prepare_resume_context(page, chat_id, logger, inline_html_limit=0)
+        
+        # Step 3: Handle based on resume mode
+        if context_info.get('mode') == 'inline':
+            return _handle_inline_capture(context_info, capture_method)
         else:
-            return { 'success': False, 'details': '所有方法均失败' }
+            return _handle_iframe_capture(page, context_info, capture_method, logger)
+
     except Exception as e:
-        return { 'success': False, 'details': f'捕获失败: {e}' }
+        return {'success': False, 'details': f'捕获失败: {e}'}
+
+
+def _validate_capture_parameters(capture_method: str, logger=None) -> Dict[str, Any]:
+    """Validate capture method parameters."""
+    if capture_method not in ["auto", "wasm", "image"]:
+        return {
+            'valid': False,
+            'result': {'success': False, 'details': f'无效的capture_method: {capture_method}'}
+        }
+    
+    if logger:
+        logger.info(f"使用捕获方法: {capture_method}")
+    
+    return {'valid': True, 'result': None}
+
+
+def _build_inline_result(
+    inline_data: Optional[Dict[str, Any]],
+    capture_method: str,
+    *,
+    details: Optional[str] = None,
+) -> Dict[str, Any]:
+    inline_data = inline_data or {}
+    rect = inline_data.get('boundingRect') or {}
+    return {
+        'success': True,
+        'text': inline_data.get('formattedText') or inline_data.get('text'),
+        'html': inline_data.get('htmlSnippet') or inline_data.get('html'),
+        'width': int(rect.get('width') or 0),
+        'height': int(rect.get('height') or 0),
+        'details': details or f"来自inline简历 - 方法:{capture_method}",
+    }
+
+
+def _handle_inline_capture(context_info: Dict[str, Any], capture_method: str) -> Dict[str, Any]:
+    """Handle inline resume capture."""
+    return _build_inline_result(context_info.get('inline'), capture_method)
+
+
+def _handle_iframe_capture(page, context_info: Dict[str, Any], capture_method: str, logger=None) -> Dict[str, Any]:
+    """Handle iframe resume capture."""
+    frame = context_info.get('frame')
+    if not frame:
+        return {'success': False, 'details': '未找到简历iframe'}
+
+    iframe_handle = context_info.get('iframe_handle') or frame.frame_element() if frame else None
+
+    # Route to specific capture method
+    if capture_method == "wasm":
+        return _capture_wasm_method(frame, capture_method)
+    elif capture_method == "image":
+        return _capture_image_method(page, frame, iframe_handle, capture_method, logger)
+    else:  # auto method
+        return _capture_auto_method(page, frame, iframe_handle, capture_method, logger)
+
+
+def _capture_wasm_method(frame, capture_method: str) -> Dict[str, Any]:
+    """Capture resume using WASM method."""
+    wasm_obj = _try_wasm_exports(frame)
+    if wasm_obj:
+        import json as _json
+        text_dump = _json.dumps(wasm_obj, ensure_ascii=False, indent=2)
+        return {
+            'success': True,
+            'text': text_dump,
+            'html': None,
+            'width': 0,
+            'height': 0,
+            'details': f'来自WASM导出 - 方法:{capture_method}'
+        }
+    return {'success': False, 'details': 'WASM方法失败'}
+
+
+def _compose_details(label: str, payload_details: Optional[str], capture_method: str) -> str:
+    base = (payload_details or '').strip()
+    if base:
+        return f"{base} - 方法:{capture_method}"
+    return f"{label} - 方法:{capture_method}"
+
+
+def _run_image_strategies(
+    page,
+    frame,
+    iframe_handle,
+    capture_method: str,
+    logger=None,
+) -> Optional[Dict[str, Any]]:
+    attempts = [
+        (
+            'Canvas toDataURL',
+            lambda: _capture_canvas_data_url(frame, logger),
+            _create_image_result,
+        ),
+        (
+            '平铺截图',
+            lambda: _capture_tiled_screenshots(frame, iframe_handle, logger),
+            _create_tiled_result,
+        ),
+    ]
+
+    if page is not None:
+        attempts.append(
+            (
+                '容器元素截图',
+                lambda: _element_screenshot_fallback(page, frame, logger),
+                _create_image_result,
+            )
+        )
+
+    for label, getter, formatter in attempts:
+        payload = getter()
+        if payload:
+            details = _compose_details(label, payload.get('details'), capture_method)
+            return formatter(payload, details)
+    return None
+
+
+def _capture_image_method(page, frame, iframe_handle, capture_method: str, logger=None) -> Dict[str, Any]:
+    """Capture resume using image methods."""
+    result = _run_image_strategies(page, frame, iframe_handle, capture_method, logger)
+    if result:
+        return result
+    return {'success': False, 'details': '所有截图方法均失败'}
+
+
+def _capture_auto_method(page, frame, iframe_handle, capture_method: str, logger=None) -> Dict[str, Any]:
+    """Capture resume using auto method with multiple fallback strategies."""
+    def inline_fallback():
+        snapshot = _capture_inline_resume(page, logger, html_limit=0, max_attempts=5)
+        if snapshot:
+            return _build_inline_result(
+                snapshot,
+                capture_method,
+                details=f"inline简历fallback - 方法:{capture_method}",
+            )
+        return None
+
+    strategies = [
+        lambda: _capture_wasm_method(frame, capture_method),
+        lambda: _try_canvas_text_hooks(frame, capture_method, logger),
+        lambda: _try_clipboard_hooks(frame, capture_method, logger),
+        lambda: _run_image_strategies(page, frame, iframe_handle, capture_method, logger),
+        inline_fallback,
+    ]
+
+    for attempt in strategies:
+        result = attempt()
+        if isinstance(result, dict) and result.get('success'):
+            return result
+
+    return {'success': False, 'details': '所有方法均失败'}
+
+
+def _try_canvas_text_hooks(frame, capture_method: str, logger=None) -> Dict[str, Any]:
+    """Try canvas text hooks method."""
+    hooked = _install_canvas_text_hooks(frame, logger)
+    if hooked:
+        rebuilt = _rebuild_text_from_logs(frame, logger)
+        if rebuilt and (rebuilt.get('text') or rebuilt.get('html')):
+            return {
+                'success': True,
+                'text': rebuilt.get('text'),
+                'html': rebuilt.get('html'),
+                'width': 0,
+                'height': 0,
+                'details': f"Canvas拦截 - 方法:{capture_method}"
+            }
+    return {'success': False, 'details': 'Canvas拦截失败'}
+
+
+def _try_clipboard_hooks(frame, capture_method: str, logger=None) -> Dict[str, Any]:
+    """Try clipboard hooks method."""
+    _install_clipboard_hooks(frame, logger)
+    _try_trigger_copy_buttons(frame, logger)
+    clip_text = _read_clipboard_logs(frame, logger)
+    if clip_text:
+        return {
+            'success': True,
+            'text': clip_text,
+            'html': None,
+            'width': 0,
+            'height': 0,
+            'details': f'剪贴板拦截 - 方法:{capture_method}'
+        }
+    return {'success': False, 'details': '剪贴板拦截失败'}
+
+
+def _create_image_result(data_url_ret: Dict[str, Any], details: str) -> Dict[str, Any]:
+    """Create standardized image result."""
+    return {
+        'success': True,
+        'text': None,
+        'html': None,
+        'image_base64': data_url_ret.get('image_base64'),
+        'data_url': data_url_ret.get('data_url'),
+        'width': data_url_ret.get('width', 0),
+        'height': data_url_ret.get('height', 0),
+        'details': details
+    }
+
+
+def _create_tiled_result(tiled_ret: Dict[str, Any], details: str) -> Dict[str, Any]:
+    """Create standardized tiled result."""
+    return {
+        'success': True,
+        'text': None,
+        'html': None,
+        'images_base64': tiled_ret.get('images_base64', []),
+        'width': tiled_ret.get('width', 0),
+        'height': tiled_ret.get('height', 0),
+        'details': details
+    }
 
 
 __all__ = [
-    'capture_resume_from_chat',
-    'CANVAS_TEXT_HOOK_SCRIPT',
-    'CANVAS_REBUILD_SCRIPT',
+    # Main public functions
+    'capture_resume_from_chat',      # Primary resume capture function
+    'prepare_resume_context',        # Resume context preparation
+    'group_text_logs_to_lines',      # Text log processing utility
+    
+    # JavaScript constants for external use
+    'CANVAS_TEXT_HOOK_SCRIPT',       # Canvas text hooking JavaScript
+    'CANVAS_REBUILD_SCRIPT',         # Canvas text rebuilding JavaScript
+    
+    # Selector constants
+    'INLINE_RESUME_SELECTORS',       # CSS selectors for inline resumes
+    'INLINE_SECTION_HEADINGS',       # Section heading patterns
 ]
 
 
