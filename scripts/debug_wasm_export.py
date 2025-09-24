@@ -41,6 +41,7 @@ def _safe_preview(payload: Any, limit: int = 1000) -> str:
         """Process a string value, escaping newlines and truncating if needed."""
         if len(s) > limit:
             s = s[:limit] + "..."
+        # Replace actual newlines with visible \n for better readability
         return s.replace('\n', '\\n').replace('\r', '\\r').replace('\t', '\\t')
     
     def _process_value(value):
@@ -52,57 +53,23 @@ def _safe_preview(payload: Any, limit: int = 1000) -> str:
         elif isinstance(value, list):
             return [_process_value(item) for item in value]
         else:
-            str_value = str(value)
-            if len(str_value) > limit:
-                str_value = str_value[:limit] + "..."
-            return str_value
+            return _process_string(str(value))
     
     try:
         processed = _process_value(payload)
         return json.dumps(processed, ensure_ascii=False, indent=2)
     except Exception:
-        # Fallback to simple string representation
-        str_payload = str(payload)
-        if len(str_payload) > limit:
-            str_payload = str_payload[:limit] + "..."
-        return str_payload
+        return _process_string(str(payload))
 
 
 def _print_step(title: str, payload: Optional[Any] = None) -> None:
     print(f"\n=== {title} ===")
     if payload is None:
+        print('(Empty payload)')
         return
     
-    # Handle different payload types with better formatting
-    if isinstance(payload, (dict, list, tuple)):
-        preview = _safe_preview(payload)
-        # If the preview is too long, show a summary first
-        if len(preview) > 2000:
-            print("📊 Large payload - showing summary:")
-            if isinstance(payload, dict):
-                print(f"   Keys: {list(payload.keys())}")
-                for key, value in payload.items():
-                    if isinstance(value, str) and len(value) > 100:
-                        print(f"   {key}: {value[:100]}... (length: {len(value)})")
-                    else:
-                        print(f"   {key}: {_safe_preview(value, 100)}")
-            elif isinstance(payload, list):
-                print(f"   List length: {len(payload)}")
-                for i, item in enumerate(payload[:3]):  # Show first 3 items
-                    print(f"   [{i}]: {_safe_preview(item, 100)}")
-                if len(payload) > 3:
-                    print(f"   ... and {len(payload) - 3} more items")
-            print(f"\n📄 Full payload (truncated):")
-            print(preview[:2000] + "..." if len(preview) > 2000 else preview)
-        else:
-            print(preview)
-    else:
-        # For simple values, show them directly
-        str_value = str(payload)
-        if len(str_value) > 500:
-            print(f"{str_value[:500]}... (length: {len(str_value)})")
-        else:
-            print(str_value)
+    preview = _safe_preview(payload)
+    print(preview)
 
 
 class _StdoutLogger:
