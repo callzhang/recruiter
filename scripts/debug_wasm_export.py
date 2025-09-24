@@ -18,9 +18,10 @@ if str(ROOT) not in sys.path:
 
 from src.config import settings  # noqa: E402
 from src.resume_capture import (  # noqa: E402
+    _build_inline_result,
+    _capture_auto_method,
     _capture_canvas_data_url,
     _capture_tiled_screenshots,
-    _format_inline_text,
     _install_canvas_text_hooks,
     _install_clipboard_hooks,
     _read_clipboard_logs,
@@ -34,24 +35,74 @@ from src.resume_capture import (  # noqa: E402
 CaptureFn = Callable[[str, Optional[Any]], None]
 
 
-def _safe_preview(payload: Any, limit: int = 2000) -> str:
+def _safe_preview(payload: Any, limit: int = 1000) -> str:
+    """Create a safe preview of payload with proper newline handling."""
+    def _process_string(s: str) -> str:
+        """Process a string value, escaping newlines and truncating if needed."""
+        if len(s) > limit:
+            s = s[:limit] + "..."
+        return s.replace('\n', '\\n').replace('\r', '\\r').replace('\t', '\\t')
+    
+    def _process_value(value):
+        """Process a single value."""
+        if isinstance(value, str):
+            return _process_string(value)
+        elif isinstance(value, dict):
+            return {k: _process_value(v) for k, v in value.items()}
+        elif isinstance(value, list):
+            return [_process_value(item) for item in value]
+        else:
+            str_value = str(value)
+            if len(str_value) > limit:
+                str_value = str_value[:limit] + "..."
+            return str_value
+    
     try:
-        text = json.dumps(payload, ensure_ascii=False, indent=2)
+        processed = _process_value(payload)
+        return json.dumps(processed, ensure_ascii=False, indent=2)
     except Exception:
-        text = repr(payload)
-    if len(text) > limit:
-        text = text[:limit] + "...<truncated>"
-    return text
+        # Fallback to simple string representation
+        str_payload = str(payload)
+        if len(str_payload) > limit:
+            str_payload = str_payload[:limit] + "..."
+        return str_payload
 
 
 def _print_step(title: str, payload: Optional[Any] = None) -> None:
     print(f"\n=== {title} ===")
     if payload is None:
         return
+    
+    # Handle different payload types with better formatting
     if isinstance(payload, (dict, list, tuple)):
-        print(_safe_preview(payload))
+        preview = _safe_preview(payload)
+        # If the preview is too long, show a summary first
+        if len(preview) > 2000:
+            print("📊 Large payload - showing summary:")
+            if isinstance(payload, dict):
+                print(f"   Keys: {list(payload.keys())}")
+                for key, value in payload.items():
+                    if isinstance(value, str) and len(value) > 100:
+                        print(f"   {key}: {value[:100]}... (length: {len(value)})")
+                    else:
+                        print(f"   {key}: {_safe_preview(value, 100)}")
+            elif isinstance(payload, list):
+                print(f"   List length: {len(payload)}")
+                for i, item in enumerate(payload[:3]):  # Show first 3 items
+                    print(f"   [{i}]: {_safe_preview(item, 100)}")
+                if len(payload) > 3:
+                    print(f"   ... and {len(payload) - 3} more items")
+            print(f"\n📄 Full payload (truncated):")
+            print(preview[:2000] + "..." if len(preview) > 2000 else preview)
+        else:
+            print(preview)
     else:
-        print(payload)
+        # For simple values, show them directly
+        str_value = str(payload)
+        if len(str_value) > 500:
+            print(f"{str_value[:500]}... (length: {len(str_value)})")
+        else:
+            print(str_value)
 
 
 class _StdoutLogger:
@@ -76,7 +127,7 @@ def _playwright_connection() -> Iterable[Tuple[Any, Browser]]:
 
 
 def _setup_wasm_route(context) -> None:
-    """如果本地存在 wasm 文件，则用它替换远程资源."""
+    """如果启用且本地存在 wasm 文件，则用它替换远程资源."""
     local_wasm = ROOT / 'wasm' / 'wasm_canvas-1.0.2-5030.js'
     if not local_wasm.exists():
         print("Local wasm_canvas-1.0.2-5030.js not found, skipping route")
@@ -135,20 +186,6 @@ def _validate_chat_id(page: Page, chat_id: str, capture: CaptureFn) -> bool:
     except Exception as e:
         capture("验证聊天ID失败", {"chat_id": chat_id, "error": str(e)})
         return False
-
-
-def _summarize_inline_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
-    formatted = snapshot.get('formattedText') or _format_inline_text(snapshot.get('text') or '')
-    preview = formatted[:1000] + ("...<truncated>" if len(formatted) > 1000 else '')
-    long_form = formatted[:20000] + ("...<truncated>" if len(formatted) > 20000 else '')
-    rect = snapshot.get('boundingRect') or {}
-    return {
-        "width": rect.get('width'),
-        "height": rect.get('height'),
-        "textLength": len(formatted),
-        "textPreview": preview,
-        "longText": long_form,
-    }
 
 
 def _run_debug_step(capture: CaptureFn, title: str, runner: Callable[[], Dict[str, Any]]) -> None:
@@ -221,12 +258,31 @@ def _image_debug(frame, iframe_handle) -> Dict[str, Any]:
     }
 
 
-def _process_inline_resume(context_info: Dict[str, Any], capture: CaptureFn) -> None:
-    snapshot = context_info.get('inline') or {}
-    capture("Inline简历快照", _summarize_inline_snapshot(snapshot))
+def _primary_capture(context_info: Dict[str, Any], page: Page) -> Dict[str, Any]:
+    mode = context_info.get('mode')
+    if mode == 'inline':
+        inline_snapshot = context_info.get('inline') or {}
+        result = _build_inline_result(inline_snapshot, 'auto')
+        text = result.get('text') or ''
+        if text:
+            result['textLength'] = len(text)
+            result['textPreview'] = text[:1000] + ("...<truncated>" if len(text) > 1000 else '')
+        result['mode'] = 'inline'
+        return result
+
+    if mode == 'iframe':
+        frame = context_info.get('frame')
+        if not frame:
+            return {'success': False, 'details': 'iframe frame missing', 'mode': 'iframe'}
+        iframe_handle = context_info.get('iframe_handle') or frame.frame_element()
+        result = _capture_auto_method(page, frame, iframe_handle, 'auto', _StdoutLogger())
+        result['mode'] = 'iframe'
+        return result
+
+    return {'success': False, 'details': '未知模式', 'mode': mode}
 
 
-def _process_iframe_resume(frame, capture: CaptureFn) -> None:
+def _emit_iframe_diagnostics(frame, iframe_handle, capture: CaptureFn) -> None:
     try:
         frame_meta = {
             "url": getattr(frame, "url", None),
@@ -236,8 +292,6 @@ def _process_iframe_resume(frame, capture: CaptureFn) -> None:
     except Exception:
         frame_meta = {"repr": repr(frame)}
     capture("iframe信息", frame_meta)
-
-    iframe_handle = frame.frame_element() if frame else None
 
     steps: List[Tuple[str, Callable[[], Dict[str, Any]]]] = [
         ("WASM导出", lambda: _wasm_debug(frame)),
@@ -298,6 +352,11 @@ def _parse_args() -> argparse.Namespace:
         type=str,
         help="Specific chat ID to test (if not provided, will use the first available chat)",
     )
+    parser.add_argument(
+        "--use-local-wasm",
+        action="store_true",
+        help="Serve local wasm_canvas bundle (behaves differently from production)",
+    )
     return parser.parse_args()
 
 
@@ -316,7 +375,9 @@ def main() -> None:
         context = browser.contexts[0] if browser.contexts else browser.new_context()
         page = context.pages[0] if context.pages else context.new_page()
 
-        _setup_wasm_route(context)
+        if args.use_local_wasm:
+          _setup_wasm_route(context)
+
         _navigate_to_chat(page, capture)
 
         # Use provided chat_id or get the first available one
@@ -353,14 +414,16 @@ def main() -> None:
             _save_results(pathlib.Path(args.output), results)
             return
 
-        if context_info.get('mode') == 'inline':
-            _process_inline_resume(context_info, capture)
-        else:
+        primary = _primary_capture(context_info, page)
+        capture("主捕获(auto)", primary)
+
+        if primary.get('mode') == 'iframe':
             frame = context_info.get('frame')
             if not frame:
                 capture("iframe错误", {"error": "iframe frame missing"})
             else:
-                _process_iframe_resume(frame, capture)
+                iframe_handle = context_info.get('iframe_handle') or frame.frame_element()
+                _emit_iframe_diagnostics(frame, iframe_handle, capture)
 
         if args.wait > 0:
             time.sleep(args.wait)
