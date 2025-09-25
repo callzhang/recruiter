@@ -1,4 +1,4 @@
 vendor/get_jobs/
 .venv/
-src/__pycache__/utils.cpython-310 2.pyc
-**/__pycache__/
+.pyc
+*/__pycache__/

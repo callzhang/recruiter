@@ -73,8 +73,8 @@ def start_service():
     print("[*] 启动Boss直聘后台服务...")
     
     # 安装依赖
-    if not install_dependencies():
-        return False
+    # if not install_dependencies():
+    #     return False
     
     # 启动服务
     try:

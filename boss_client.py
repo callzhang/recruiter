@@ -173,6 +173,13 @@ class BossClientOptimized:
         """请求简历"""
         return self._make_request('POST', '/resume/request', data={'chat_id': chat_id})
     
+    def send_message(self, chat_id: str, message: str) -> Dict[str, Any]:
+        """发送消息到指定对话"""
+        return self._make_request('POST', '/messages/send', data={
+            'chat_id': chat_id,
+            'message': message
+        })
+    
     def get_resume(self, chat_id: str) -> ResumeResult:
         """获取简历 - 返回结构化的ResumeResult对象
         

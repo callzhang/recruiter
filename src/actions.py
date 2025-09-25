@@ -88,3 +88,83 @@ def request_resume_action(page, chat_id: str) -> Dict[str, Any]:
         return { 'success': False, 'already_sent': False, 'details': '未检测到发送成功提示' }
 
 
+def send_message_action(page, chat_id: str, message: str) -> Dict[str, Any]:
+    """Send a text message in the open chat panel for the given chat_id."""
+    # Locate target chat item
+    target = None
+    for sel in ["div.geek-item", "[role='listitem']"]:
+        try:
+            items = page.locator(sel).all()
+        except Exception:
+            items = []
+        for it in items:
+            try:
+                did = it.get_attribute('data-id') or it.get_attribute('id')
+                if did and chat_id and did == chat_id:
+                    target = it
+                    break
+            except Exception:
+                continue
+        if target:
+            break
+
+    if not target:
+        return { 'success': False, 'details': '未找到指定对话项' }
+
+    try:
+        target.click()
+    except Exception as e:
+        return { 'success': False, 'details': f'点击对话失败: {e}' }
+
+    # Wait for conversation panel to load
+    try:
+        page.wait_for_selector("div.conversation-message", timeout=5000)
+    except Exception:
+        return { 'success': False, 'details': '对话面板未加载' }
+
+    # Find the message input field
+    input_field = page.locator("#boss-chat-editor-input").first
+    if not input_field or input_field.count() == 0:
+        return { 'success': False, 'details': '未找到消息输入框' }
+    
+    try:
+        input_field.wait_for(state="visible", timeout=3000)
+    except Exception:
+        return { 'success': False, 'details': '消息输入框未显示' }
+
+    # Clear existing content and type the message
+    try:
+        input_field.click()
+        input_field.fill("")  # Clear existing content
+        input_field.type(message)
+    except Exception as e:
+        return { 'success': False, 'details': f'输入消息失败: {e}' }
+
+    # Find and click the send button
+    send_button = page.locator("div.submit:has-text('发送')").first
+    if not send_button or send_button.count() == 0:
+        return { 'success': False, 'details': '未找到发送按钮' }
+    
+    try:
+        send_button.wait_for(state="visible", timeout=3000)
+        send_button.click()
+    except Exception as e:
+        return { 'success': False, 'details': f'点击发送按钮失败: {e}' }
+
+    # Wait a moment for the message to be sent
+    try:
+        page.wait_for_timeout(1000)
+    except Exception:
+        pass
+
+    # Verify the message was sent by checking if input field is cleared
+    try:
+        current_content = input_field.inner_text()
+        if not current_content.strip():
+            return { 'success': True, 'details': '消息发送成功' }
+        else:
+            return { 'success': False, 'details': '消息可能未发送成功，输入框仍有内容' }
+    except Exception:
+        return { 'success': True, 'details': '消息发送完成（无法验证）' }
+
+
