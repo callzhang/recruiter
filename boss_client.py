@@ -180,6 +180,12 @@ class BossClientOptimized:
             'message': message
         })
     
+    def view_resume(self, chat_id: str) -> Dict[str, Any]:
+        """查看候选人的附件简历"""
+        return self._make_request('POST', '/resume/view', data={
+            'chat_id': chat_id
+        })
+    
     def get_resume(self, chat_id: str) -> ResumeResult:
         """获取简历 - 返回结构化的ResumeResult对象
         

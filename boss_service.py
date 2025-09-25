@@ -25,7 +25,7 @@ from src.config import settings
 from src.utils import export_records
 from src.chat_utils import ensure_on_chat_page, find_chat_item
 from src.extractors import extract_candidates, extract_messages, extract_chat_history
-from src.actions import request_resume_action, send_message_action
+from src.actions import request_resume_action, send_message_action, view_resume_action
 from src import page_selectors as sel
 from src.blacklist import load_blacklist, NEGATIVE_HINTS
 from src.events import EventManager
@@ -304,6 +304,24 @@ class BossService:
                     'chat_id': chat_id,
                     'messages': history,
                     'count': len(history),
+                    'timestamp': datetime.now().isoformat()
+                })
+            except Exception as e:
+                return JSONResponse({
+                    'success': False,
+                    'error': str(e),
+                    'timestamp': datetime.now().isoformat()
+                })
+
+        @self.app.post('/resume/view')
+        def view_resume_api(chat_id: str = Body(..., embed=True)):
+            """点击查看候选人的附件简历"""
+            try:
+                result = self.view_resume(chat_id)
+                return JSONResponse({
+                    'success': result.get('success', False),
+                    'chat_id': chat_id,
+                    'details': result.get('details', ''),
                     'timestamp': datetime.now().isoformat()
                 })
             except Exception as e:
@@ -859,6 +877,22 @@ class BossService:
             return send_message_action(self.page, chat_id, message)
         except Exception as e:
             self.add_notification(f"发送消息失败: {e}", "error")
+            raise
+
+    def view_resume(self, chat_id: str) -> dict:
+        """点击查看候选人的附件简历。
+        返回: { success: bool, details: str }
+        """
+        # 确保浏览器会话和登录
+        self._ensure_browser_session()
+        if not self.is_logged_in and not self.ensure_login():
+            raise Exception("未登录")
+
+        try:
+            ensure_on_chat_page(self.page, settings, self.add_notification, timeout_ms=6000)
+            return view_resume_action(self.page, chat_id)
+        except Exception as e:
+            self.add_notification(f"查看简历失败: {e}", "error")
             raise
 
     def view_online_resume(self, chat_id: str) -> dict:

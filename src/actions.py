@@ -168,3 +168,71 @@ def send_message_action(page, chat_id: str, message: str) -> Dict[str, Any]:
         return { 'success': True, 'details': '消息发送完成（无法验证）' }
 
 
+def view_resume_action(page, chat_id: str) -> Dict[str, Any]:
+    """点击查看候选人的附件简历"""
+    # Locate target chat item
+    target = None
+    for sel in ["div.geek-item", "[role='listitem']"]:
+        try:
+            items = page.locator(sel).all()
+        except Exception:
+            items = []
+        for it in items:
+            try:
+                did = it.get_attribute('data-id') or it.get_attribute('id')
+                if did and chat_id and did == chat_id:
+                    target = it
+                    break
+            except Exception:
+                continue
+        if target:
+            break
+
+    if not target:
+        return { 'success': False, 'details': '未找到指定对话项' }
+
+    try:
+        target.click()
+    except Exception as e:
+        return { 'success': False, 'details': f'点击对话失败: {e}' }
+
+    # Wait for conversation panel to load
+    try:
+        page.wait_for_selector("div.conversation-message", timeout=5000)
+    except Exception:
+        return { 'success': False, 'details': '对话面板未加载' }
+
+    # Find and click the resume file button
+    resume_button = page.locator("a.btn.resume-btn-file").first
+    if not resume_button or resume_button.count() == 0:
+        return { 'success': False, 'details': '未找到附件简历按钮' }
+    
+    try:
+        resume_button.wait_for(state="visible", timeout=3000)
+        resume_button.click()
+    except Exception as e:
+        return { 'success': False, 'details': f'点击附件简历按钮失败: {e}' }
+
+    # Wait for resume viewer to appear
+    try:
+        page.wait_for_selector("#viewerContainer", timeout=5000)
+    except Exception:
+        return { 'success': False, 'details': '简历查看器未出现' }
+
+    # Wait a moment for the viewer to fully load
+    try:
+        page.wait_for_timeout(2000)
+    except Exception:
+        pass
+
+    # Check if viewer is visible and has content
+    try:
+        viewer = page.locator("#viewerContainer").first
+        if viewer.is_visible():
+            return { 'success': True, 'details': '简历查看器已打开' }
+        else:
+            return { 'success': False, 'details': '简历查看器未显示' }
+    except Exception as e:
+        return { 'success': False, 'details': f'检查简历查看器失败: {e}' }
+
+
