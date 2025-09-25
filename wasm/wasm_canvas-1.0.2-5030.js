@@ -246,14 +246,60 @@ function debugString(val) {
     // TODO we could test for more things here, like `Set`s and `Map`s.
     return className;
 }
+function ensureResumeStore() {
+    try {
+        if (typeof window === 'undefined') {
+            return null;
+        }
+        window.__resume_data_store = window.__resume_data_store || {};
+        return window.__resume_data_store;
+    } catch (_) {
+        return null;
+    }
+}
+
+function cloneForStore(value) {
+    try {
+        if (typeof structuredClone === 'function') {
+            return structuredClone(value);
+        }
+    } catch (_) {
+    }
+    try {
+        if (value === undefined) {
+            return value;
+        }
+        return JSON.parse(JSON.stringify(value));
+    } catch (_) {
+        return value;
+    }
+}
+
 /**
  * @param {string} name
  * @param {Function} callback
  */
 export function register_js_callback(name, callback) {
+    const store = ensureResumeStore();
+    let wrapped = callback;
+    if (store && typeof callback === 'function') {
+        const label = String(name || '');
+        store.callbackLogs = store.callbackLogs || [];
+        wrapped = function(arg) {
+            try {
+                // Capture the payload that rust hands back before downstream code mutates it.
+                store.callbackLogs.push({
+                    name: label,
+                    payload: cloneForStore(arg),
+                    ts: Date.now(),
+                });
+            } catch (_) {}
+            return callback.apply(this, arguments);
+        };
+    }
     const ptr0 = passStringToWasm0(name, wasm.__wbindgen_export_0, wasm.__wbindgen_export_1);
     const len0 = WASM_VECTOR_LEN;
-    wasm.register_js_callback(ptr0, len0, addHeapObject(callback));
+    wasm.register_js_callback(ptr0, len0, addHeapObject(wrapped));
 }
 
 /**
@@ -265,7 +311,21 @@ export function trigger_rust_callback(name, arg) {
     const ptr0 = passStringToWasm0(name, wasm.__wbindgen_export_0, wasm.__wbindgen_export_1);
     const len0 = WASM_VECTOR_LEN;
     const ret = wasm.trigger_rust_callback(ptr0, len0, addHeapObject(arg));
-    return takeObject(ret);
+    const result = takeObject(ret);
+    const store = ensureResumeStore();
+    if (store) {
+        store.triggerLogs = store.triggerLogs || [];
+        try {
+            // Record both the input payload and the rust return value for later scraping.
+            store.triggerLogs.push({
+                name: String(name || ''),
+                arg: cloneForStore(arg),
+                result: cloneForStore(result),
+                ts: Date.now(),
+            });
+        } catch (_) {}
+    }
+    return result;
 }
 
 export function destroy_rust_callback() {
