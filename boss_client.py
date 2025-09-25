@@ -173,30 +173,26 @@ class BossClientOptimized:
         """请求简历"""
         return self._make_request('POST', '/resume/request', data={'chat_id': chat_id})
     
-    def get_resume(self, chat_id: str, capture_method: str = "auto") -> ResumeResult:
+    def get_resume(self, chat_id: str) -> ResumeResult:
         """获取简历 - 返回结构化的ResumeResult对象
         
         Args:
             chat_id: 聊天ID
-            capture_method: 捕获方法 ("auto", "wasm", "image")
         
         Returns:
             ResumeResult: 结构化的简历结果对象
         """
         response = self._make_request('POST', '/resume/online', data={
-            'chat_id': chat_id,
-            'capture_method': capture_method
+            'chat_id': chat_id
         })
         
         if response.get('success'):
             return ResumeResult(
                 success=True,
                 chat_id=response.get('chat_id', chat_id),
-                capture_method=response.get('capture_method', capture_method),
+                capture_method="auto",  # 固定为auto
                 text=response.get('text'),
                 html=response.get('html'),
-                image_base64=response.get('image_base64'),
-                images_base64=response.get('images_base64'),
                 data_url=response.get('data_url'),
                 width=response.get('width', 0),
                 height=response.get('height', 0),
@@ -207,7 +203,7 @@ class BossClientOptimized:
             return ResumeResult(
                 success=False,
                 chat_id=chat_id,
-                capture_method=capture_method,
+                capture_method="auto",  # 固定为auto
                 error=response.get('error') or response.get('details', 'Unknown error')
             )
     

@@ -2,6 +2,7 @@
 """
 Boss直聘后台服务（FastAPI版） - 保持登录状态，提供API接口
 """
+from ast import pattern
 import re
 from playwright.sync_api import sync_playwright, expect
 import sys
@@ -19,7 +20,6 @@ import signal
 import tempfile # Import tempfile
 import logging # Import logging
 import shutil # Import shutil
-from pathlib import Path
 
 from src.config import settings
 from src.utils import export_records
@@ -295,35 +295,29 @@ class BossService:
                 })
 
         @self.app.post('/resume/online')
-        def view_online_resume_api(chat_id: str = Body(..., embed=True), capture_method: str = Body("auto", embed=True)):
+        def view_online_resume_api(chat_id: str = Body(..., embed=True)):
             """打开会话并查看在线简历，返回canvas图像base64等信息
             
             Args:
                 chat_id: 聊天ID
-                capture_method: 捕获方法 ("auto", "wasm", "image")
             """
-            try:
-                result = self.view_online_resume(chat_id, capture_method)
-                return JSONResponse({
-                    'success': result.get('success', False),
-                    'chat_id': chat_id,
-                    'capture_method': capture_method,
-                    'text': result.get('text'),
-                    'html': result.get('html'),
-                    'image_base64': result.get('image_base64'),
-                    'images_base64': result.get('images_base64'),
-                    'data_url': result.get('data_url'),
-                    'width': result.get('width'),
-                    'height': result.get('height'),
-                    'details': result.get('details', ''),
-                    'timestamp': datetime.now().isoformat()
-                })
-            except Exception as e:
-                return JSONResponse({
-                    'success': False,
-                    'error': str(e),
-                    'timestamp': datetime.now().isoformat()
-                })
+            result = self.view_online_resume(chat_id)
+            return JSONResponse({
+                'success': result.get('success', False),
+                'chat_id': chat_id,
+                'text': result.get('text'),
+                'html': result.get('html'),
+                'image_base64': result.get('image_base64'),
+                'images_base64': result.get('images_base64'),
+                'data_url': result.get('data_url'),
+                'width': result.get('width'),
+                'height': result.get('height'),
+                'details': result.get('details', ''),
+                'error': result.get('error'),
+                'timestamp': datetime.now().isoformat(),
+                'capture_method': result.get('capture_method'),
+            })
+
         
         @self.app.post('/restart')
         def soft_restart():
@@ -464,6 +458,7 @@ class BossService:
         # Use a temporary directory to store browser session data
         # This will persist across service restarts but be cleaned up on system reboot
         return os.path.join(tempfile.gettempdir(), "bosszhipin_playwright_user_data")
+        
 
     def start_browser(self):
         """Launch a persistent browser context with recovery."""
@@ -486,25 +481,6 @@ class BossService:
             except Exception as e:
                 self.add_notification(f"CDP连接失败，终止启动: {e}", "error")
                 raise
-
-            try:
-                local_wasm = Path(__file__).resolve().parent / 'wasm' / 'wasm_canvas-1.0.2-5030.js'
-                if local_wasm.exists():
-                    def _route_resume(route, request):
-                        if request.method.upper() != 'GET':
-                            return route.continue_()
-                        try:
-                            self.add_notification("拦截wasm_canvas脚本，使用本地patched版本", "info")
-                        except Exception:
-                            pass
-                        return route.fulfill(path=str(local_wasm), content_type='application/javascript; charset=utf-8')
-
-                    self.context.unroute("https://static.zhipin.com/assets/zhipin/wasm/resume/wasm_canvas-1.0.2-5030.js")
-                    self.context.route("https://static.zhipin.com/assets/zhipin/wasm/resume/wasm_canvas-1.0.2-5030.js", _route_resume)
-                else:
-                    self.add_notification("本地 wasm_canvas-1.0.2-5030.js 未找到，跳过路由拦截", "warning")
-            except Exception as route_err:
-                self.add_notification(f"设置wasm路由拦截失败: {route_err}", "error")
 
             # （可选）本地存储态仅适用于本地持久化；CDP模式下依靠浏览器自身profile
 
@@ -850,14 +826,14 @@ class BossService:
         history = extract_chat_history(self.page, chat_id)
         return history
 
-    def view_online_resume(self, chat_id: str, capture_method: str = "auto") -> dict:
-        """点击会话 -> 点击“在线简历” -> 使用多级回退链条输出文本或图像。"""
+    def view_online_resume(self, chat_id: str) -> dict:
+        """点击会话 -> 点击"在线简历" -> 使用多级回退链条输出文本或图像。"""
         # 会话与登录
-        self._ensure_browser_session()
-        if not self.is_logged_in and not self.ensure_login():
-            raise Exception("未登录")
+        # self._ensure_browser_session()
+        # if not self.is_logged_in and not self.ensure_login():
+        #     raise Exception("未登录")
 
-        result = capture_resume_from_chat(self.page, chat_id, logger=self.logger, capture_method=capture_method)
+        result = capture_resume_from_chat(self.page, chat_id, logger=self.logger)
         # 统一加上success存在性
         if not isinstance(result, dict):
             return { 'success': False, 'details': '未知错误: 结果类型异常' }
