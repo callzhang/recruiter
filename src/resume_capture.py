@@ -26,7 +26,10 @@ from typing import Any, Dict, Optional
 
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
-from .chat_utils import close_overlay_dialogs
+try:
+    from .chat_utils import close_overlay_dialogs
+except ImportError:
+    from chat_utils import close_overlay_dialogs
 
 INLINE_RESUME_SELECTORS = [
     '.resume-box',
@@ -346,7 +349,10 @@ def _try_open_online_resume(page, chat_id: str, logger=None) -> Dict[str, Any]:
     Returns { success, details } and leaves the UI on the online resume dialog.
     """
     # Close existing overlay if present
-    from .chat_utils import close_overlay_dialogs
+    try:
+        from .chat_utils import close_overlay_dialogs
+    except ImportError:
+        from chat_utils import close_overlay_dialogs
     closed = close_overlay_dialogs(page, add_notification=lambda msg, level: _log(logger, level, msg))
     if closed:
         _log(logger, "info", "已关闭遮挡的弹出层")
