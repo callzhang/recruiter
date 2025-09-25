@@ -48,6 +48,31 @@ INLINE_SECTION_HEADINGS = [
     '自我评价',
 ]
 
+DETAIL_TRIGGER_NAMES = {
+    'resume_detail',
+    'export_resume_detail_info',
+    'geek_detail',
+    'geek_detail_info',
+    'RUST_CALLBACK_POSITION_EXPERIENCE_TITLE_POSITION',
+    'RUST_CALLBACK_ANALYSIS_TITLE_POSITION',
+}
+
+
+def _has_resume_detail(payload: Any) -> bool:
+    if isinstance(payload, dict):
+        keys = set(payload.keys())
+        if keys.intersection({'geekDetailInfo', 'geekWorkExpList', 'geekProjExpList', 'resumeModuleInfoList', 'geekWorkPositionExpDescList'}):
+            return True
+        if 'abstractData' in payload and isinstance(payload['abstractData'], dict):
+            return _has_resume_detail(payload['abstractData'])
+    elif isinstance(payload, list) and payload:
+        head = payload[0]
+        if isinstance(head, dict):
+            keys = set(head.keys())
+            if keys and keys.intersection({'company', 'positionName', 'projectName', 'projectDesc', 'duty'}):
+                return True
+    return False
+
 
 CANVAS_TEXT_HOOK_SCRIPT = dedent("""
 (function(){
@@ -163,6 +188,53 @@ CANVAS_REBUILD_SCRIPT = dedent("""
   } catch (err) {
     return { html: '', text: '', lineCount: 0, itemCount: 0, error: String(err) };
   }
+})();
+""")
+
+
+PARENT_MESSAGE_HOOK_SCRIPT = dedent("""
+(function(){
+  try {
+    if (window.__resume_message_hooked) { return true; }
+    window.__resume_message_hooked = true;
+  } catch (err) {
+  }
+
+  function safeClone(value) {
+    try {
+      if (typeof structuredClone === 'function') {
+        return structuredClone(value);
+      }
+    } catch (err) {}
+    try {
+      if (value === undefined) {
+        return value;
+      }
+      return JSON.parse(JSON.stringify(value));
+    } catch (err) {}
+    return value;
+  }
+
+  function pushMessage(entry) {
+    try {
+      window.__resume_messages = window.__resume_messages || [];
+      window.__resume_messages.push(entry);
+    } catch (err) {}
+  }
+
+  try {
+    window.addEventListener('message', function(evt){
+      try {
+        if (!evt || !evt.data) { return; }
+        var payload = evt.data;
+        if (payload && payload.type === 'IFRAME_DONE') {
+          pushMessage({ ts: Date.now(), data: safeClone(payload) });
+        }
+      } catch (err) {}
+    }, true);
+  } catch (err) {}
+
+  return true;
 })();
 """)
 
@@ -353,7 +425,7 @@ def _try_open_online_resume(page, chat_id: str, logger=None) -> Dict[str, Any]:
         from .chat_utils import close_overlay_dialogs
     except ImportError:
         from chat_utils import close_overlay_dialogs
-    closed = close_overlay_dialogs(page, add_notification=lambda msg, level: _log(logger, level, msg))
+    closed = close_overlay_dialogs(page, logger)
     if closed:
         _log(logger, "info", "已关闭遮挡的弹出层")
 
@@ -382,28 +454,31 @@ def _try_open_online_resume(page, chat_id: str, logger=None) -> Dict[str, Any]:
     # Click online resume button
     try:
         btn = page.locator("a.resume-btn-online").first
-        if btn and btn.count() > 0:
-            btn.wait_for(state="visible", timeout=5000)
-            btn.click()
-        else:
-            return { 'success': False, 'details': '未找到“在线简历”按钮' }
+        btn.wait_for(state="visible", timeout=5000)
+        btn.click()
     except Exception as e:
         return { 'success': False, 'details': f'点击在线简历失败: {e}' }
+
+    # wait for the div.toast to disappear
+    # try:
+    #     page.wait_for_selector("div.toast", timeout=5000)
+    #     page.wait_for_selector("div.toast", state="detached", timeout=5000)
+    #     _log(logger, "info", "toast消失")
+    #     time.sleep(1)
+    # except Exception as e:
+    #     _log(logger, "error", f"等待toast消失失败: {e}")
+
+    # #IMPORTANT: wait for the div.toast to disappear, but we cannot use playwright to wait for it because it will be blocked by the iframe
+    # time.sleep(8)
 
     return { 'success': True, 'details': '已打开在线简历' }
 
 
 
 def _wait_for_resume_entry(page, timeout_ms: int, logger=None) -> Dict[str, Any]:
-    # first wait for boss-layer__wrapper
-    try:
-        t0 = time.time()
-        page.wait_for_selector("div.boss-layer__wrapper", timeout=timeout_ms)
-        print("已检测到在线简历对话框", time.time() - t0)
-        time.sleep(3)
-    except PlaywrightTimeoutError:
-        pass
-    # then detect iframe or inline
+    # first wait for message
+    t0 = time.time()
+
     selector = (
         "iframe[src*='c-resume'], "
         ".resume-box"
@@ -413,8 +488,12 @@ def _wait_for_resume_entry(page, timeout_ms: int, logger=None) -> Dict[str, Any]
         print("已检测到iframe或inline", time.time() - t0)
     except PlaywrightTimeoutError:
         return {'mode': None}
+    # while not (handle:=page.query_selector(selector)):
+    #     time.sleep(1)
+    #     print(f'{time.time() - t0} 等待iframe或inline')
 
     tag = handle.evaluate("el => el.tagName.toLowerCase()")
+    print(f'已经检测到iframe或inline：{tag}')
     if tag == 'iframe':
         frame = handle.content_frame() or page.frame(url=re.compile(r"/c-resume"))
         return {
@@ -453,10 +532,12 @@ def prepare_resume_context(
 
     This is a high-level orchestrator that coordinates the resume preparation process.
     """
+    _install_parent_message_listener(page, logger)
+    
     open_result = _try_open_online_resume(page, chat_id, logger)
     if not open_result.get('success'):
         return _create_error_result(open_result, '无法打开在线简历')
-
+    # time.sleep(10)
     entry = _wait_for_resume_entry(page, total_timeout, logger)
     entry.update(open_result)
     return entry
@@ -766,10 +847,96 @@ def _try_wasm_exports(frame, logger=None) -> Optional[Dict[str, Any]]:
         except Exception as extras_err:
             extras = { 'error': str(extras_err) }
 
+        store_state = {}
+        try:
+            store_state = frame.evaluate(
+                """
+                () => {
+                    try {
+                        const store = window.__resume_data_store || {};
+                        return {
+                            exportInfo: store.export_geek_detail_info || null,
+                            geekInfo: store.geek_detail_info || null,
+                            callbackLogs: Array.isArray(store.callbackLogs) ? store.callbackLogs.slice() : [],
+                            triggerLogs: Array.isArray(store.triggerLogs) ? store.triggerLogs.slice() : [],
+                        };
+                    } catch (err) {
+                        return { __error: String(err) };
+                    }
+                }
+                """
+            )
+        except Exception as store_err:
+            store_state = { '__error': str(store_err) }
+
         
         data_obj = payload.get("data")
         if isinstance(data_obj, dict) and isinstance(extras, dict):
             data_obj.update(extras)
+
+        if isinstance(data_obj, dict) and isinstance(store_state, dict):
+            if '__error' in store_state:
+                data_obj.setdefault('storeErrors', []).append(store_state['__error'])
+            export_info = store_state.get('exportInfo')
+            if isinstance(export_info, dict):
+                data_obj.setdefault('exportInfo', export_info)
+                if isinstance(export_info.get('geekDetailInfo'), dict):
+                    data_obj.setdefault('geekDetailInfo', {}).update(export_info['geekDetailInfo'])
+                if isinstance(export_info.get('geekWorkExpList'), list) and export_info['geekWorkExpList']:
+                    data_obj['geekWorkExpList'] = export_info['geekWorkExpList']
+                if isinstance(export_info.get('geekProjExpList'), list) and export_info['geekProjExpList']:
+                    data_obj['geekProjExpList'] = export_info['geekProjExpList']
+
+            geek_info = store_state.get('geekInfo')
+            if isinstance(geek_info, dict) and geek_info:
+                data_obj.setdefault('geekDetailInfo', {}).update(geek_info)
+
+            trigger_details: Dict[str, Any] = {}
+            for entry in store_state.get('triggerLogs') or []:
+                if not isinstance(entry, dict):
+                    continue
+                name = str(entry.get('name') or '').strip()
+                if not name:
+                    continue
+                result_payload = entry.get('result')
+                if name in DETAIL_TRIGGER_NAMES or _has_resume_detail(result_payload):
+                    if result_payload not in (None, '', [], {}):
+                        trigger_details[name] = result_payload
+            if trigger_details:
+                data_obj.setdefault('triggerDetails', {}).update(trigger_details)
+                for detail in trigger_details.values():
+                    if isinstance(detail, dict):
+                        if isinstance(detail.get('geekDetailInfo'), dict):
+                            data_obj.setdefault('geekDetailInfo', {}).update(detail['geekDetailInfo'])
+                        if isinstance(detail.get('geekWorkExpList'), list) and detail['geekWorkExpList']:
+                            data_obj['geekWorkExpList'] = detail['geekWorkExpList']
+                        if isinstance(detail.get('geekProjExpList'), list) and detail['geekProjExpList']:
+                            data_obj['geekProjExpList'] = detail['geekProjExpList']
+                        if isinstance(detail.get('geekWorkPositionExpDescList'), list) and detail['geekWorkPositionExpDescList']:
+                            data_obj['geekWorkPositionExpDescList'] = detail['geekWorkPositionExpDescList']
+
+            callback_details: Dict[str, Any] = {}
+            for entry in store_state.get('callbackLogs') or []:
+                if not isinstance(entry, dict):
+                    continue
+                name = str(entry.get('name') or '').strip()
+                payload_data = entry.get('payload')
+                if not name or payload_data in (None, '', []):
+                    continue
+                if name in {'FIRST_LAYOUT', 'SEGMENT_TEXT', 'SEND_ACTION'} or _has_resume_detail(payload_data):
+                    callback_details.setdefault(name, []).append(payload_data)
+                    if isinstance(payload_data, dict):
+                        abstract = payload_data.get('abstractData')
+                        if isinstance(abstract, dict) and _has_resume_detail(abstract):
+                            if isinstance(abstract.get('geekProjExpList'), list) and abstract['geekProjExpList']:
+                                data_obj['geekProjExpList'] = abstract['geekProjExpList']
+                            if isinstance(abstract.get('geekWorkExpList'), list) and abstract['geekWorkExpList']:
+                                data_obj['geekWorkExpList'] = abstract['geekWorkExpList']
+                            if isinstance(abstract.get('geekDetailInfo'), dict):
+                                data_obj.setdefault('geekDetailInfo', {}).update(abstract['geekDetailInfo'])
+            if callback_details:
+                data_obj.setdefault('callbackDetails', {}).update(callback_details)
+
         result = {
             'text': data_obj,
             'method': 'WASM导出'
@@ -793,6 +960,72 @@ def _install_canvas_text_hooks(frame, logger=None) -> bool:
     except Exception as e:
         _log(logger, "error", f"安装fillText钩子失败: {e}")
         return False
+
+
+def _install_parent_message_listener(page, logger=None) -> bool:
+
+    page.evaluate("() => { try { window.__resume_messages = []; } catch (_) {} }")
+    try:
+        return bool(page.evaluate(PARENT_MESSAGE_HOOK_SCRIPT))
+    except Exception as e:
+        _log(logger, "error", f"安装父级消息监听失败: {e}")
+        return False
+
+
+def _collect_parent_messages(page, logger=None) -> Dict[str, Any]:
+    """Collect iframe→parent resume messages captured by PARENT_MESSAGE_HOOK_SCRIPT."""
+    if page is None:
+        return {'success': False, 'text': {}, 'messages': [], 'error': '页面对象缺失', 'method': '消息捕获'}
+
+    try:
+        messages = page.evaluate(
+            """
+            () => {
+              try {
+                const store = window.__resume_messages;
+                if (!store || !Array.isArray(store)) {
+                  return [];
+                }
+                return store.slice();
+              } catch (err) {
+                return { __error: String(err) };
+              }
+            }
+            """
+        )
+    except Exception as e:
+        _log(logger, "error", f"读取父级消息失败: {e}")
+        return {'success': False, 'text': {}, 'messages': [], 'error': str(e), 'method': '消息捕获'}
+
+    if isinstance(messages, dict) and '__error' in messages:
+        return {'success': False, 'text': {}, 'messages': [], 'error': messages.get('__error') or '未知错误', 'method': '消息捕获'}
+
+    messages = messages if isinstance(messages, list) else []
+
+    abstract_data: Optional[Dict[str, Any]] = None
+    for entry in messages:
+        if not isinstance(entry, dict):
+            continue
+        data = entry.get('data')
+        if not isinstance(data, dict):
+            continue
+        # Payload shape is { type: 'IFRAME_DONE', data: { abstractData: {...}, ... } }
+        candidate = data.get('data') if isinstance(data.get('data'), dict) else data
+        abstract = candidate.get('abstractData') if isinstance(candidate, dict) else None
+        if isinstance(abstract, dict) and abstract:
+            abstract_data = abstract
+            break
+
+    success = isinstance(abstract_data, dict) and bool(abstract_data)
+    result: Dict[str, Any] = {
+        'success': success,
+        'text': abstract_data if isinstance(abstract_data, dict) else {},
+        'messages': messages,
+        'method': '消息捕获',
+    }
+    if not success:
+        result['error'] = '未截获abstractData'
+    return result
 
 
 def _rebuild_text_from_logs(frame, logger=None) -> Optional[Dict[str, Any]]:
@@ -1175,19 +1408,30 @@ def capture_resume_from_chat(page, chat_id: str, logger=None) -> Dict[str, Any]:
         """Handle iframe resume capture."""
         iframe_handle = context_info.get('iframe_handle')
 
+        # Collect any iframe→parent messages first; the postMessage often contains raw JSON.
+        parent_result = _collect_parent_messages(page, logger)
+
         # Route to specific capture method
         """Capture iframe resume using WASM/Canvas/Hooks/Image method."""
         wasm_result = _try_wasm_exports(frame, logger)
         canvas_result = _try_canvas_text_hooks(frame, logger)
         hooks_result = _try_clipboard_hooks(frame, logger)
-        # image_result = _run_image_strategies(page, frame, iframe_handle, logger)
-        success = any(result.get('success') for result in [wasm_result, canvas_result, hooks_result])
-        methods = [result.get('method') for result in [wasm_result, canvas_result, hooks_result]]
-        text = wasm_result.get('text', {})
-        text.update(canvas_result.get('text', {}))
-        text.update(hooks_result.get('text', {}))
-        error = wasm_result.get('error', '') + canvas_result.get('error', '\n') + hooks_result.get('error', '\n')
-        
+
+        results = [res for res in [parent_result, wasm_result, canvas_result, hooks_result] if isinstance(res, dict)]
+
+        success = any(result.get('success') for result in results)
+        methods = [result.get('method') for result in results]
+
+        aggregated_text: Dict[str, Any] = {}
+        for result in results:
+            payload = result.get('text')
+            if isinstance(payload, dict):
+                aggregated_text.update(payload)
+            elif isinstance(payload, str) and payload:
+                aggregated_text[result.get('method', '文本')] = payload
+
+        error = '\n'.join(filter(None, [result.get('error', '') for result in results]))
+
         # Close any overlay dialogs including resume frames
         # closed = close_overlay_dialogs(
         #     page, 
@@ -1197,7 +1441,7 @@ def capture_resume_from_chat(page, chat_id: str, logger=None) -> Dict[str, Any]:
         
         return {
             'success': success,
-            'text': text,
+            'text': aggregated_text,
             'capture_method': methods,
             'error': error
         }
