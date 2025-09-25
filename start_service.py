@@ -136,13 +136,17 @@ def start_service():
                 return False
 
         # 使用 uvicorn 启动（可开启 --reload；CDP模式下重载不会中断浏览器）
+        # 只监控与 boss_service 相关的核心文件，排除不必要的文件
         cmd = [
             sys.executable, "-m", "uvicorn",
             "boss_service:app",
             "--host", host,
             "--port", port,
             "--log-level", "info",
-            "--reload"
+            "--reload",
+            "--reload-include", "boss_service.py",
+            "--reload-dir", "src/",
+            '--reload-delay', '5.0'
         ]
         # 新建进程组，以便整体发送信号
         process = subprocess.Popen(cmd, env=env, preexec_fn=os.setsid)
