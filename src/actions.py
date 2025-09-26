@@ -203,14 +203,68 @@ def view_resume_action(page, chat_id: str) -> Dict[str, Any]:
         page.wait_for_selector("iframe.attachment-box", timeout=8000)
         iframe = page.frame_locator("iframe.attachment-box")
         # Get the pdf viewer content
-        pdf_viewer = iframe.locator("div.pdfViewer").wait_for(state="visible", timeout=5000)
+        pdf_viewer = iframe.locator("div.pdfViewer")
+        # Wait for content to load
+        pdf_viewer.wait_for(state="visible", timeout=5000)
     except Exception as e:
         page.locator(close_locator).click(timeout=100)
         return { 'success': False, 'details': '简历查看器未出现', 'error': str(e) }
 
-    # get the content of the viewer
+    # get the content of the viewer using enhanced extraction
     try:
-        content = pdf_viewer.inner_text()
+        # Use JavaScript evaluation for better text extraction
+        content_data = page.evaluate("""
+            () => {
+                const iframe = document.querySelector('iframe.attachment-box');
+                if (!iframe) return null;
+                
+                try {
+                    const iframeDoc = iframe.contentDocument || iframe.contentWindow.document;
+                    const pdfViewer = iframeDoc.querySelector('div.pdfViewer');
+                    if (!pdfViewer) return null;
+                    
+                    // Get all text content from various elements
+                    const textElements = pdfViewer.querySelectorAll('div.textLayer > div, div.textLayer > span, div.textLayer > p');
+                    let fullText = '';
+                    let htmlContent = '';
+                    
+                    textElements.forEach(el => {
+                        const text = el.innerText || el.textContent || '';
+                        const html = el.innerHTML || '';
+                        if (text.trim()) {
+                            fullText += text + '\\n';
+                        }
+                        if (html.trim()) {
+                            htmlContent += html + '\\n';
+                        }
+                    });
+                    
+                    // Fallback to innerText if no specific elements found
+                    if (!fullText.trim()) {
+                        fullText = pdfViewer.innerText || pdfViewer.textContent || '';
+                    }
+                    
+                    return {
+                        text: fullText.trim(),
+                        html: htmlContent.trim(),
+                        textLength: fullText.length,
+                        elementCount: textElements.length
+                    };
+                } catch (e) {
+                    return { error: e.toString() };
+                }
+            }
+        """)
+        
+        if content_data and 'error' not in content_data:
+            content = content_data.get('text', '')
+            if not content and content_data.get('html'):
+                # Fallback to HTML content if no text found
+                content = content_data.get('html', '')
+        else:
+            # Fallback to simple inner_text
+            content = pdf_viewer.inner_text()
+            
     except Exception as e:
         content = f"无法获取简历内容: {e}"
     finally:
