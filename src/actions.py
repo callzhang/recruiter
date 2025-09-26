@@ -7,6 +7,8 @@ from __future__ import annotations
 import time
 from typing import Any, Dict, final
 
+from playwright.sync_api import Frame
+
 
 def request_resume_action(page, chat_id: str) -> Dict[str, Any]:
     """Send a resume request in the open chat panel for the given chat_id."""
@@ -200,77 +202,144 @@ def view_resume_action(page, chat_id: str) -> Dict[str, Any]:
     # Wait for resume viewer to appear
     try:
         # Wait for iframe to appear first
-        page.wait_for_selector("iframe.attachment-box", timeout=8000)
-        iframe = page.frame_locator("iframe.attachment-box")
-        # Get the pdf viewer content
-        pdf_viewer = iframe.locator("div.pdfViewer")
-        # Wait for content to load
-        pdf_viewer.wait_for(state="visible", timeout=5000)
+        iframe_handle = page.wait_for_selector("iframe.attachment-box", timeout=8000)
+        frame = iframe_handle.content_frame()
+        if frame is None:
+            raise RuntimeError('attachment iframe 无法获取到 frame 对象')
+        frame.wait_for_selector("div.pdfViewer", timeout=5000)
     except Exception as e:
         page.locator(close_locator).click(timeout=100)
         return { 'success': False, 'details': '简历查看器未出现', 'error': str(e) }
 
-    # get the content of the viewer using enhanced extraction
     try:
-        # Use JavaScript evaluation for better text extraction
-        content_data = page.evaluate("""
-            () => {
-                const iframe = document.querySelector('iframe.attachment-box');
-                if (!iframe) return null;
-                
-                try {
-                    const iframeDoc = iframe.contentDocument || iframe.contentWindow.document;
-                    const pdfViewer = iframeDoc.querySelector('div.pdfViewer');
-                    if (!pdfViewer) return null;
-                    
-                    // Get all text content from various elements
-                    const textElements = pdfViewer.querySelectorAll('div.textLayer > div, div.textLayer > span, div.textLayer > p');
-                    let fullText = '';
-                    let htmlContent = '';
-                    
-                    textElements.forEach(el => {
-                        const text = el.innerText || el.textContent || '';
-                        const html = el.innerHTML || '';
-                        if (text.trim()) {
-                            fullText += text + '\\n';
-                        }
-                        if (html.trim()) {
-                            htmlContent += html + '\\n';
-                        }
-                    });
-                    
-                    // Fallback to innerText if no specific elements found
-                    if (!fullText.trim()) {
-                        fullText = pdfViewer.innerText || pdfViewer.textContent || '';
-                    }
-                    
-                    return {
-                        text: fullText.trim(),
-                        html: htmlContent.trim(),
-                        textLength: fullText.length,
-                        elementCount: textElements.length
-                    };
-                } catch (e) {
-                    return { error: e.toString() };
-                }
-            }
-        """)
-        
-        if content_data and 'error' not in content_data:
-            content = content_data.get('text', '')
-            if not content and content_data.get('html'):
-                # Fallback to HTML content if no text found
-                content = content_data.get('html', '')
-        else:
-            # Fallback to simple inner_text
-            content = pdf_viewer.inner_text()
-            
-    except Exception as e:
-        content = f"无法获取简历内容: {e}"
+        content = _scrape_pdf_viewer(frame)
     finally:
         page.locator(close_locator).click(timeout=100)
     
-    return { 'success': True, 'details': '简历查看器已打开', 'content': content }
+    return {
+        'success': True,
+        'details': '简历查看器已打开',
+        'content': content.get('text', ''),
+        'pages': content.get('pages', []),
+    }
 
 
 
+def _scrape_pdf_viewer(frame: Frame) -> Dict[str, Any]:
+    """Extract text from the PDF viewer by walking its text layers."""
+    try:
+        # Wait for at least one page textLayer to stabilize
+        frame.locator("div.textLayer").first.wait_for(state="visible", timeout=5000)
+    except Exception:
+        pass
+
+    def _collect_text() -> Dict[str, Any]:
+        return frame.evaluate(
+            """
+            async () => {
+              const app = window.PDFViewerApplication;
+              if (!app || !app.pdfDocument) {
+                return { __error: 'pdfDocument not ready' };
+              }
+
+              const doc = app.pdfDocument;
+              const viewer = app.pdfViewer;
+              const scale = viewer && viewer._currentScale ? viewer._currentScale : 1;
+              const results = [];
+
+              for (let pageIndex = 1; pageIndex <= doc.numPages; pageIndex++) {
+                const page = await doc.getPage(pageIndex);
+                const viewport = page.getViewport({ scale });
+                const textContent = await page.getTextContent();
+
+                const items = textContent.items.map(item => {
+                  const [x, y] = viewport.convertToViewportPoint(item.transform[4], item.transform[5]);
+                  const height = item.height || Math.abs(item.transform[3]) || 1;
+                  const width = item.width || Math.abs(item.transform[0]) || 1;
+                  return {
+                    text: item.str,
+                    x,
+                    y,
+                    height,
+                    width,
+                  };
+                }).filter(item => item.text && item.text.trim());
+
+                items.sort((a, b) => {
+                  if (Math.abs(a.y - b.y) > 2) {
+                    return a.y - b.y;
+                  }
+                  return a.x - b.x;
+                });
+
+                const lines = [];
+                let currentY = null;
+                let buffer = [];
+                let tolerance = 6;
+                if (items.length) {
+                  const heights = items.map(s => s.height).filter(Boolean);
+                  const avg = heights.reduce((acc, val) => acc + val, 0) / heights.length;
+                  tolerance = Math.max(6, avg * 0.8);
+                }
+
+                const flush = () => {
+                  if (!buffer.length) return;
+                  const joined = buffer
+                    .join(' ')
+                    .replace(/\u00a0/g, ' ')
+                    .replace(/\s+/g, ' ')
+                    .trim();
+                  if (joined) {
+                    lines.push(joined);
+                  }
+                  buffer = [];
+                };
+
+                for (const item of items) {
+                  if (currentY === null) {
+                    currentY = item.y;
+                  }
+                  if (Math.abs(item.y - currentY) > tolerance) {
+                    flush();
+                    currentY = item.y;
+                  }
+                  buffer.push(item.text);
+                }
+                flush();
+
+                results.push({ page: pageIndex, lines, text: lines.join('\n') });
+              }
+
+              return results;
+            }
+            """
+        )
+
+    try:
+        pages = _collect_text() or []
+    except Exception:
+        pages = []
+
+    if isinstance(pages, dict):
+        if '__error' in pages:
+            # Fall back to DOM-based extraction if pdf.js API is unavailable
+            pages = []
+        else:
+            pages = [pages]
+
+    if not pages:
+        try:
+            fallback = frame.evaluate("() => document.body.innerText || ''")
+        except Exception:
+            fallback = ''
+        return {'pages': [], 'text': fallback if isinstance(fallback, str) else ''}
+
+    combined_lines = []
+    for page in pages:
+        lines = page.get('lines') or []
+        if not lines:
+            continue
+        combined_lines.extend(lines)
+
+    text = '\n'.join(line for line in combined_lines if line)
+    return {'pages': pages, 'text': text}

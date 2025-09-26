@@ -318,12 +318,7 @@ class BossService:
             """点击查看候选人的附件简历"""
             try:
                 result = self.view_resume(chat_id)
-                return JSONResponse({
-                    'success': result.get('success', False),
-                    'chat_id': chat_id,
-                    'details': result.get('details', ''),
-                    'timestamp': datetime.now().isoformat()
-                })
+                return result
             except Exception as e:
                 return JSONResponse({
                     'success': False,
