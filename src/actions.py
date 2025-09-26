@@ -171,63 +171,64 @@ def send_message_action(page, chat_id: str, message: str) -> Dict[str, Any]:
 def view_resume_action(page, chat_id: str) -> Dict[str, Any]:
     """点击查看候选人的附件简历"""
     # Locate target chat item
+    close_locator = 'div.boss-popup__close'
     try:
-        page.locator('div.boss-popup__close', timeout=100).click()
+        page.locator(close_locator).click(timeout=100)
     except Exception:
         pass
-    target = None
-    try:
-        items = page.locator("div.geek-item").all()
-    except Exception:
-        items = []
-    for it in items:
-        try:
-            did = it.get_attribute('data-id') or it.get_attribute('id')
-            if did and chat_id and did == chat_id:
-                target = it
-                break
-        except Exception:
-            continue
 
+    # Locate target chat item
+    target = None
+    items = page.locator("div.geek-item").all()
+    for it in items:
+        did = it.get_attribute('data-id') or it.get_attribute('id')
+        if did and chat_id and did == chat_id:
+            target = it
+            break
     if not target:
         return { 'success': False, 'details': '未找到指定对话项' }
-
-    try:
-        target.click()
-    except Exception as e:
-        return { 'success': False, 'details': f'点击对话失败: {e}' }
+    
+    target.click()
 
     # Wait for conversation panel to load
-    try:
-        page.wait_for_selector("div.conversation-message", timeout=500)
-    except Exception:
-        return { 'success': False, 'details': '对话面板未加载' }
+    page.wait_for_selector("div.conversation-message", timeout=500)
 
     # Find and click the resume file button
     resume_button = page.locator("a.btn.resume-btn-file").first
-    
-    try:
-        resume_button.click()
-    except Exception as e:
-        return { 'success': False, 'details': f'点击附件简历按钮失败: {e}' }
+    resume_button.click()
 
     # Wait for resume viewer to appear
     try:
-        page.wait_for_selector("div.new-resume-online-main-ui", timeout=5000)
+        # Try multiple selectors for resume viewer
+        page.wait_for_selector("iframe.attachment-box", timeout=3000)
     except Exception:
-        page.locator('div.boss-popup__close').click()
-        return { 'success': False, 'details': '简历查看器未出现' }
+        try:
+            page.wait_for_selector("div.new-resume-online-main-ui", timeout=3000)
+        except Exception:
+            page.locator(close_locator).click(timeout=100)
+            return { 'success': False, 'details': '简历查看器未出现' }
 
     # Wait a moment for the viewer to fully load
-    time.sleep(1)
+    time.sleep(2)
 
     # get the content of the viewer
+    content = ""
     try:
-        content = page.locator('div.new-resume-online-main-ui').inner_text()
-    except Exception as e:
-        return { 'success': False, 'details': f'简历查看器未出现: {e}' }
+        # Try iframe first
+        iframe = page.frame_locator("iframe.attachment-box")
+        content = iframe.locator('div.textLayer').first.inner_text()
+    except Exception:
+        try:
+            # Fallback to direct content
+            content = page.locator('div.new-resume-online-main-ui').inner_text()
+        except Exception as e:
+            content = f"无法获取简历内容: {e}"
     finally:
-        page.locator('div.boss-popup__close').click()
+        try:
+            page.locator(close_locator).click(timeout=100)
+        except Exception:
+            pass
+    
     return { 'success': True, 'details': '简历查看器已打开', 'content': content }
 
 
