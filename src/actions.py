@@ -199,35 +199,22 @@ def view_resume_action(page, chat_id: str) -> Dict[str, Any]:
 
     # Wait for resume viewer to appear
     try:
-        # Try multiple selectors for resume viewer
-        page.wait_for_selector("iframe.attachment-box", timeout=3000)
-    except Exception:
-        try:
-            page.wait_for_selector("div.new-resume-online-main-ui", timeout=3000)
-        except Exception:
-            page.locator(close_locator).click(timeout=100)
-            return { 'success': False, 'details': '简历查看器未出现' }
-
-    # Wait a moment for the viewer to fully load
-    time.sleep(2)
+        # Wait for iframe to appear first
+        page.wait_for_selector("iframe.attachment-box", timeout=8000)
+        iframe = page.frame_locator("iframe.attachment-box")
+        # Get the pdf viewer content
+        pdf_viewer = iframe.locator("div.pdfViewer").wait_for(state="visible", timeout=5000)
+    except Exception as e:
+        page.locator(close_locator).click(timeout=100)
+        return { 'success': False, 'details': '简历查看器未出现', 'error': str(e) }
 
     # get the content of the viewer
-    content = ""
     try:
-        # Try iframe first
-        iframe = page.frame_locator("iframe.attachment-box")
-        content = iframe.locator('div.textLayer').first.inner_text()
-    except Exception:
-        try:
-            # Fallback to direct content
-            content = page.locator('div.new-resume-online-main-ui').inner_text()
-        except Exception as e:
-            content = f"无法获取简历内容: {e}"
+        content = pdf_viewer.inner_text()
+    except Exception as e:
+        content = f"无法获取简历内容: {e}"
     finally:
-        try:
-            page.locator(close_locator).click(timeout=100)
-        except Exception:
-            pass
+        page.locator(close_locator).click(timeout=100)
     
     return { 'success': True, 'details': '简历查看器已打开', 'content': content }
 
