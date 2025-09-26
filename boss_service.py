@@ -890,7 +890,8 @@ class BossService:
 
         try:
             ensure_on_chat_page(self.page, settings, self.add_notification, timeout_ms=6000)
-            return view_resume_action(self.page, chat_id)
+            resume_result = view_resume_action(self.page, chat_id)
+            return resume_result
         except Exception as e:
             self.add_notification(f"查看简历失败: {e}", "error")
             raise
@@ -945,16 +946,23 @@ class BossService:
         if not self.page or self.page.is_closed():
             try:
                 pages = list(self.context.pages)
-                self.page = pages[0] if pages else self.context.new_page()
-                if settings.CHAT_URL not in getattr(self.page, 'url', ''):
-                    try:
-                        self.page.goto(settings.CHAT_URL, wait_until="domcontentloaded", timeout=10000)
+                # First, try to find a page that already has CHAT_URL
+                for page in pages:
+                    if settings.CHAT_URL in getattr(page, 'url', ''):
+                        self.page = page
+                        break
+                else:
+                    # If no page with CHAT_URL found, use first available page or create new one
+                    self.page = pages[0] if pages else self.context.new_page()
+                    if settings.CHAT_URL not in getattr(self.page, 'url', ''):
                         try:
-                            self.page.wait_for_load_state("networkidle", timeout=5000)
+                            self.page.goto(settings.CHAT_URL, wait_until="domcontentloaded", timeout=10000)
+                            try:
+                                self.page.wait_for_load_state("networkidle", timeout=5000)
+                            except Exception:
+                                pass
                         except Exception:
                             pass
-                    except Exception:
-                        pass
             except Exception:
                 self.start_browser()
                 return
