@@ -760,23 +760,21 @@ class BossService:
             
             self.add_notification(f"获取候选人列表 (限制: {limit})", "info")
             
+        try:
+            # 等待加载提示消失
             try:
-                # 访问聊天页面并等待就绪
-                ensure_on_chat_page(self.page, settings, self.add_notification, timeout_ms=6000)
-                # 等待加载提示消失
-                try:
-                    self.page.wait_for_function(
-                        "() => !document.body.innerText.includes('加载中，请稍候')",
-                        timeout=30000
-                    )
-                except Exception:
-                    pass
-            except Exception as e:
-                self.add_notification(f"访问聊天页面失败: {e}", "error")
-                raise Exception(f"访问聊天页面失败: {e}")
+                self.page.wait_for_function(
+                    "() => !document.body.innerText.includes('加载中，请稍候')",
+                    timeout=30000
+                )
+            except Exception:
+                pass
             
             # DOM 提取
             candidates = extract_candidates(self.page, limit=limit, add_notification=self.add_notification)
+        except Exception as e:
+            self.add_notification(f"获取候选人列表失败: {e}", "error")
+            raise
         
         # 黑名单过滤（如果存在）
         if candidates and hasattr(self, 'black_companies'):
@@ -814,7 +812,6 @@ class BossService:
             self.add_notification(f"获取消息列表 (限制: {limit})", "info")
             
             try:
-                ensure_on_chat_page(self.page, settings, self.add_notification, timeout_ms=6000)
                 messages = extract_messages(self.page, limit=limit, chat_cache=self.event_manager.chat_cache.get_all())
                 if not messages:
                     # 使用事件管理器获取缓存的消息
@@ -839,7 +836,6 @@ class BossService:
             raise Exception("未登录")
 
         try:
-            ensure_on_chat_page(self.page, settings, self.add_notification, timeout_ms=6000)
             return request_resume_action(self.page, chat_id)
         except Exception as e:
             self.add_notification(f"求简历操作失败: {e}", "error")
@@ -859,7 +855,6 @@ class BossService:
         if not self.is_logged_in and not self.ensure_login():
             raise Exception("未登录")
 
-        ensure_on_chat_page(self.page, settings, self.add_notification, timeout_ms=6000)
         history = extract_chat_history(self.page, chat_id)
         return history
 
@@ -873,7 +868,6 @@ class BossService:
             raise Exception("未登录")
 
         try:
-            ensure_on_chat_page(self.page, settings, self.add_notification, timeout_ms=6000)
             return send_message_action(self.page, chat_id, message)
         except Exception as e:
             self.add_notification(f"发送消息失败: {e}", "error")
@@ -889,7 +883,6 @@ class BossService:
             raise Exception("未登录")
 
         try:
-            ensure_on_chat_page(self.page, settings, self.add_notification, timeout_ms=6000)
             resume_result = view_resume_action(self.page, chat_id)
             return resume_result
         except Exception as e:
