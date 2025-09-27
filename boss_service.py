@@ -28,7 +28,7 @@ from src.extractors import extract_candidates, extract_messages, extract_chat_hi
 from src.chat_actions import (
     request_resume_action,
     send_message_action,
-    view_resume_action,
+    view_full_resume_action,
     discard_candidate_action,
     get_candidates_list_action,
     get_messages_list_action,
@@ -381,7 +381,7 @@ class BossService:
                 # 确保浏览器会话和登录
                 self._ensure_browser_session()
 
-                result = view_resume_action(self.page, chat_id, logger=self.add_notification)
+                result = view_full_resume_action(self.page, chat_id, logger=self.add_notification)
                 return result
             except Exception as e:
                 return JSONResponse({

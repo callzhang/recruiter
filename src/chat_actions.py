@@ -289,14 +289,6 @@ def get_chat_history_action(page, chat_id: str, *, logger=lambda msg, level: Non
         raise
 
 
-def view_resume_action(page, chat_id: str, *, logger=lambda msg, level: None) -> Dict[str, Any]:
-    """点击查看候选人的附件简历"""
-    try:
-        resume_result = view_full_resume_action(page, chat_id)
-        return resume_result
-    except Exception as e:
-        logger(f"查看简历失败: {e}", "error")
-        raise
 
 
 def view_online_resume_action(page, chat_id: str, *, logger=lambda msg, level: None) -> Dict[str, Any]:
