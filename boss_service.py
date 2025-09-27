@@ -154,10 +154,10 @@ class BossService:
         @self.app.post('/login')
         def login():
             try:
-                result = self.ensure_login()
+                self._ensure_browser_session()
                 return JSONResponse({
-                    'success': result,
-                    'message': '登录成功' if result else '登录失败',
+                    'success': self.is_logged_in,
+                    'message': '登录成功' if self.is_logged_in else '登录失败',
                     'timestamp': datetime.now().isoformat()
                 })
             except Exception as e:
@@ -230,10 +230,6 @@ class BossService:
                     # 确保浏览器会话正常
                     self._ensure_browser_session()
                     
-                    # 复用统一的登录逻辑
-                    if not self.is_logged_in:
-                        if not self.ensure_login():
-                            return JSONResponse(status_code=401, content={"error": "Not logged in"})
 
                 messages = get_messages_list_action(
                     self.page, 
@@ -323,8 +319,6 @@ class BossService:
             try:
                 # 确保浏览器会话和登录
                 self._ensure_browser_session()
-                if not self.is_logged_in and not self.ensure_login():
-                    raise Exception("未登录")
 
                 result = request_resume_action(self.page, chat_id, logger=self.add_notification)
                 return JSONResponse({
@@ -347,8 +341,6 @@ class BossService:
             try:
                 # 确保浏览器会话和登录
                 self._ensure_browser_session()
-                if not self.is_logged_in and not self.ensure_login():
-                    raise Exception("未登录")
 
                 result = send_message_action(self.page, chat_id, message, logger=self.add_notification)
                 return JSONResponse({
@@ -371,8 +363,6 @@ class BossService:
             try:
                 # 确保会话
                 self._ensure_browser_session()
-                if not self.is_logged_in and not self.ensure_login():
-                    raise Exception("未登录")
 
                 history = get_chat_history_action(self.page, chat_id, logger=self.add_notification)
                 return JSONResponse({
@@ -395,8 +385,6 @@ class BossService:
             try:
                 # 确保浏览器会话和登录
                 self._ensure_browser_session()
-                if not self.is_logged_in and not self.ensure_login():
-                    raise Exception("未登录")
 
                 result = view_resume_action(self.page, chat_id, logger=self.add_notification)
                 return result
@@ -413,8 +401,6 @@ class BossService:
             try:
                 # 确保浏览器会话和登录
                 self._ensure_browser_session()
-                if not self.is_logged_in and not self.ensure_login():
-                    raise Exception("未登录")
 
                 result = discard_candidate_action(self.page, chat_id, logger=self.add_notification)
                 return JSONResponse({
@@ -748,106 +734,6 @@ class BossService:
             self.add_notification(f"检查登录状态失败: {e}", "error")
             return False
     
-    def ensure_login(self, max_wait_time=600):
-        """确保登录状态"""
-        self.add_notification("正在检查登录状态...", "info")
-        self._ensure_browser_session()
-
-        try:
-            # If the current page is blank, we must navigate.
-            # Otherwise, check if we are already on the correct chat page.
-            if settings.CHAT_URL in self.page.url and "加载中" not in self.page.content():
-                page_text = self.page.locator("body").inner_text()
-                # More comprehensive login detection
-                login_indicators = ["消息", "聊天", "对话", "沟通", "候选人", "简历", "打招呼"]
-                if any(indicator in page_text for indicator in login_indicators):
-                    self.is_logged_in = True
-                    self.save_login_state()
-                    self.add_notification("已在聊天页面，登录状态确认。", "success")
-                    return True
-                
-                # Also check for the presence of conversation list elements
-                try:
-                    conversation_elements = self.page.locator("xpath=//li[contains(@class, 'conversation') or contains(@class, 'chat') or contains(@class, 'item')]")
-                    if conversation_elements.count() > 0:
-                        self.is_logged_in = True
-                        self.save_login_state()
-                        self.add_notification("检测到对话列表，登录状态确认。", "success")
-                        return True
-                except Exception:
-                    pass
-            
-            # Wait for page to load and check if we were redirected to login page
-            try:
-                self.page.wait_for_load_state("networkidle", timeout=5000)
-            except Exception:
-                pass
-            current_url = self.page.url
-            
-            # Check if we were redirected to login page
-            if settings.LOGIN_URL in current_url or "web/user" in current_url or "login" in current_url.lower() or "bticket" in current_url:
-                self.add_notification("检测到登录页面，请手动完成登录...", "warning")
-                self.add_notification("等待用户登录，最多等待10分钟...", "info")
-                
-                # Wait for user to complete login with countdown display
-                start_time = time.time()
-                while time.time() - start_time < max_wait_time:
-                    try:
-                        current_url = self.page.url
-                        page_text = self.page.locator("body").inner_text()
-                        
-                        # Check if user has logged in (URL contains chat page or page content contains chat keywords)
-                        if (settings.CHAT_URL in current_url or 
-                            any(keyword in page_text for keyword in ["消息", "沟通", "聊天", "候选人", "简历"])):
-                            self.add_notification("检测到用户已登录！", "success")
-                            break
-                        
-                        # Check if still on login page
-                        if "登录" in page_text and ("立即登录" in page_text or "登录/注册" in page_text):
-                            self.add_notification("请在浏览器中完成登录...", "info")
-                        
-                        # Display countdown
-                        elapsed = time.time() - start_time
-                        remaining = max_wait_time - elapsed
-                        minutes = int(remaining // 60)
-                        seconds = int(remaining % 60)
-                        print(f"\r⏰ 等待登录中... 剩余时间: {minutes:02d}:{seconds:02d}", end="", flush=True)
-                        
-                        
-                    except Exception as e:
-                        self.add_notification(f"检查登录状态时出错: {e}", "warning")
-                    
-                    time.sleep(3)
-                
-                # Clear the countdown line
-                print("\r" + " " * 50 + "\r", end="", flush=True)
-                
-                if not self.is_logged_in:
-                    raise Exception("等待登录超时，请手动登录后重试")
-            else:
-                # If we reached the chat page directly, wait for it to load
-                self.add_notification("等待聊天页面加载...", "info")
-                self.page.wait_for_url(
-                    lambda url: settings.CHAT_URL in url,
-                    timeout=6000, # 10 minutes
-                )
-            
-            # Final verification after navigation/login
-            self.page.wait_for_function(
-                "() => !document.body.innerText.includes('加载中，请稍候')",
-                timeout=30000
-            )
-            self.is_logged_in = True
-            self.save_login_state()
-            self.add_notification("登录成功并已在聊天页面。", "success")
-            return True
-
-        except Exception as e:
-            self.is_logged_in = False
-            self.add_notification(f"登录检查或等待超时失败: {e}", "error")
-            import traceback
-            self.add_notification(traceback.format_exc(), "error")
-            return False
     
     
     def _graceful_shutdown(self):
@@ -874,7 +760,8 @@ class BossService:
         self.add_notification("Playwright资源已清理", "success")
     
 
-    def _ensure_browser_session(self):
+    def _ensure_browser_session(self, max_wait_time=600):
+        """确保浏览器会话和登录状态"""
         # Context present?
         if not self.context:
             self.add_notification("浏览器Context不存在，将重新启动。", "warning")
@@ -913,6 +800,103 @@ class BossService:
             self.add_notification(f"页面标题检查失败: {title_error}，将重新启动。", "warning")
             self.start_browser()
             return
+
+        # Login verification - merged from ensure_login
+        if not self.is_logged_in:
+            self.add_notification("正在检查登录状态...", "info")
+            
+            try:
+                # If the current page is on chat URL, check login status
+                if settings.CHAT_URL in self.page.url and "加载中" not in self.page.content():
+                    page_text = self.page.locator("body").inner_text()
+                    # More comprehensive login detection
+                    login_indicators = ["消息", "聊天", "对话", "沟通", "候选人", "简历", "打招呼"]
+                    if any(indicator in page_text for indicator in login_indicators):
+                        self.is_logged_in = True
+                        self.save_login_state()
+                        self.add_notification("已在聊天页面，登录状态确认。", "success")
+                        return
+                    
+                    # Also check for the presence of conversation list elements
+                    try:
+                        conversation_elements = self.page.locator("xpath=//li[contains(@class, 'conversation') or contains(@class, 'chat') or contains(@class, 'item')]")
+                        if conversation_elements.count() > 0:
+                            self.is_logged_in = True
+                            self.save_login_state()
+                            self.add_notification("检测到对话列表，登录状态确认。", "success")
+                            return
+                    except Exception:
+                        pass
+                
+                # Wait for page to load and check if we were redirected to login page
+                try:
+                    self.page.wait_for_load_state("networkidle", timeout=5000)
+                except Exception:
+                    pass
+                current_url = self.page.url
+                
+                # Check if we were redirected to login page
+                if settings.LOGIN_URL in current_url or "web/user" in current_url or "login" in current_url.lower() or "bticket" in current_url:
+                    self.add_notification("检测到登录页面，请手动完成登录...", "warning")
+                    self.add_notification("等待用户登录，最多等待10分钟...", "info")
+                    
+                    # Wait for user to complete login with countdown display
+                    start_time = time.time()
+                    while time.time() - start_time < max_wait_time:
+                        try:
+                            current_url = self.page.url
+                            page_text = self.page.locator("body").inner_text()
+                            
+                            # Check if user has logged in
+                            if (settings.CHAT_URL in current_url or 
+                                any(keyword in page_text for keyword in ["消息", "沟通", "聊天", "候选人", "简历"])):
+                                self.add_notification("检测到用户已登录！", "success")
+                                break
+                            
+                            # Check if still on login page
+                            if "登录" in page_text and ("立即登录" in page_text or "登录/注册" in page_text):
+                                self.add_notification("请在浏览器中完成登录...", "info")
+                            
+                            # Display countdown
+                            elapsed = time.time() - start_time
+                            remaining = max_wait_time - elapsed
+                            minutes = int(remaining // 60)
+                            seconds = int(remaining % 60)
+                            print(f"\r⏰ 等待登录中... 剩余时间: {minutes:02d}:{seconds:02d}", end="", flush=True)
+                            
+                        except Exception as e:
+                            self.add_notification(f"检查登录状态时出错: {e}", "warning")
+                        
+                        time.sleep(3)
+                    
+                    # Clear the countdown line
+                    print("\r" + " " * 50 + "\r", end="", flush=True)
+                    
+                    if not self.is_logged_in:
+                        raise Exception("等待登录超时，请手动登录后重试")
+                else:
+                    # If we reached the chat page directly, wait for it to load
+                    self.add_notification("等待聊天页面加载...", "info")
+                    self.page.wait_for_url(
+                        lambda url: settings.CHAT_URL in url,
+                        timeout=6000, # 10 minutes
+                    )
+                
+                # Final verification after navigation/login
+                self.page.wait_for_function(
+                    "() => !document.body.innerText.includes('加载中，请稍候')",
+                    timeout=30000
+                )
+                self.is_logged_in = True
+                self.save_login_state()
+                self.add_notification("登录成功并已在聊天页面。", "success")
+
+            except Exception as e:
+                self.is_logged_in = False
+                self.add_notification(f"登录检查或等待超时失败: {e}", "error")
+                import traceback
+                self.add_notification(traceback.format_exc(), "error")
+                raise Exception("登录失败")
 
     
     def send_greeting(self, candidate_id, message):
