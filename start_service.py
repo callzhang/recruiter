@@ -136,7 +136,7 @@ def start_service():
                 return False
 
         # 设置环境变量来禁用对虚拟环境的监视
-        env['WATCHFILES_FORCE_POLLING'] = "true"
+        # env['WATCHFILES_FORCE_POLLING'] = "true"
         
         # 使用 uvicorn 启动（可开启 --reload；CDP模式下重载不会中断浏览器）
         # 只监控与 boss_service 相关的核心文件，排除不必要的文件
@@ -146,21 +146,10 @@ def start_service():
             "--host", host,
             "--port", port,
             "--log-level", "info",
-            "--reload",
-            "--reload-exclude", "**/.venv/**",
-            "--reload-exclude", "**/__pycache__/**",
-            "--reload-exclude", "**/*.pyc",
-            "--reload-exclude", "**/node_modules/**",
-            "--reload-exclude", "**/test/**",
-            "--reload-exclude", "**/docs/**",
-            "--reload-exclude", "**/scripts/**",
-            "--reload-exclude", "**/vendor/**",
-            "--reload-exclude", "**/wasm/**",
-            "--reload-exclude", "**/data/**",
-            "--reload-exclude", "**/jobs/**",
-            "--reload-exclude", "**/tasks/**",
-            "--reload-exclude", "**/*.log",
-            "--reload-exclude", "**/*.tmp",
+            # "--reload", 
+            "--reload-include", "boss_service.py",
+            "--reload-include", "boss_client.py",
+            "--reload-dir", "src",
             '--reload-delay', '3.0'
         ]
         # 新建进程组，以便整体发送信号

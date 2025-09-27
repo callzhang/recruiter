@@ -4,7 +4,7 @@ import os
 class Settings(BaseModel):
     BASE_URL: str = os.getenv("BASE_URL", "https://www.zhipin.com/")
     CHAT_URL: str = os.getenv("CHAT_URL", "https://www.zhipin.com/web/chat/index")
-    LOGIN_URL: str = os.getenv("LOGIN_URL", "https://www.zhipin.com/web/user/?ka=bticket")
+    LOGIN_URL: str = os.getenv("LOGIN_URL", "https://www.zhipin.com/web/user")
     STORAGE_STATE: str = os.getenv("STORAGE_STATE", "data/state.json")
     HEADLESS: bool = os.getenv("HEADLESS", "False").lower() == "true"
     SLOWMO_MS: int = int(os.getenv("SLOWMO_MS", "50"))
