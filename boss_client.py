@@ -186,6 +186,12 @@ class BossClientOptimized:
             'chat_id': chat_id
         })
     
+    def discard_candidate(self, chat_id: str) -> Dict[str, Any]:
+        """丢弃候选人 - 点击"不合适"按钮"""
+        return self._make_request('POST', '/candidate/discard', data={
+            'chat_id': chat_id
+        })
+    
     def get_resume(self, chat_id: str) -> ResumeResult:
         """获取简历 - 返回结构化的ResumeResult对象
         
@@ -220,7 +226,9 @@ class BossClientOptimized:
                 error=response.get('error') or response.get('details', 'Unknown error')
             )
     
-    
+    def view_online_resume(self, chat_id: str) -> ResumeResult:
+        """查看在线简历 - 与 get_resume 方法相同，提供向后兼容性"""
+        return self.get_resume(chat_id)
     
     def restart(self) -> Dict[str, Any]:
         """重启服务"""
@@ -275,7 +283,6 @@ class BossClientOptimized:
             return response.choices[0].message.content.strip()
         except Exception as e:
             return f"OpenAI OCR失败: {str(e)}"
-    
 
 
 # 向后兼容的别名
@@ -286,7 +293,7 @@ def main():
     """命令行接口"""
     parser = argparse.ArgumentParser(description='Boss直聘客户端')
     parser.add_argument('--url', default='http://127.0.0.1:5001', help='API服务地址')
-    parser.add_argument('command', choices=['status', 'login', 'messages', 'resume'], help='命令')
+    parser.add_argument('command', choices=['status', 'login', 'messages', 'resume', 'discard'], help='命令')
     parser.add_argument('--chat-id', help='聊天ID')
     parser.add_argument('--capture-method', default='auto', choices=['auto', 'wasm', 'image'], help='捕获方法')
     parser.add_argument('--save-dir', help='保存目录')
@@ -311,7 +318,7 @@ def main():
                 print("错误: 需要提供 --chat-id 参数")
                 sys.exit(1)
             
-            result = client.get_resume(args.chat_id, args.capture_method)
+            result = client.get_resume(args.chat_id)
             
             if result.success:
                 print(f"✅ 简历获取成功!")
@@ -332,6 +339,14 @@ def main():
                         print(f"图片保存到: {saved_images}")
             else:
                 print(f"❌ 简历获取失败: {result.error}")
+        
+        elif args.command == 'discard':
+            if not args.chat_id:
+                print("错误: 需要提供 --chat-id 参数")
+                sys.exit(1)
+            
+            result = client.discard_candidate(args.chat_id)
+            print(json.dumps(result, indent=2, ensure_ascii=False))
 
 
 if __name__ == "__main__":
