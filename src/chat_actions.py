@@ -93,51 +93,47 @@ def request_resume_action(page, chat_id: str, *, logger=lambda msg, level: None)
 
 def send_message_action(page, chat_id: str, message: str, *, logger=lambda msg, level: None) -> Dict[str, Any]:
     """Send a text message in the open chat panel for the given chat_id"""
+    _, error = _prepare_chat_page(page, chat_id)
+    if error:
+        return error
+
+    # Find the message input field
+    input_field = page.locator(MESSAGE_INPUT_SELECTOR).first
+    if not input_field.count():
+        return { 'success': False, 'details': '未找到消息输入框' }
+    
     try:
-        _, error = _prepare_chat_page(page, chat_id)
-        if error:
-            return error
+        input_field.wait_for(state="visible", timeout=3000)
+    except Exception:
+        return { 'success': False, 'details': '消息输入框未显示' }
 
-        # Find the message input field
-        input_field = page.locator(MESSAGE_INPUT_SELECTOR).first
-        if not input_field.count():
-            return { 'success': False, 'details': '未找到消息输入框' }
-        
-        try:
-            input_field.wait_for(state="visible", timeout=3000)
-        except Exception:
-            return { 'success': False, 'details': '消息输入框未显示' }
-
-        # Clear existing content and type the message
-        try:
-            input_field.click()
-            input_field.fill("")  # Clear existing content
-            input_field.type(message)
-        except Exception as e:
-            return { 'success': False, 'details': f'输入消息失败: {e}' }
-
-        # Find and click the send button
-        send_button = page.locator("div.submit:has-text('发送')").first
-        if not send_button.count():
-            return { 'success': False, 'details': '未找到发送按钮' }
-        
-        try:
-            send_button.wait_for(state="visible", timeout=3000)
-            send_button.click()
-        except Exception as e:
-            return { 'success': False, 'details': f'点击发送按钮失败: {e}' }
-
-        # Wait a moment for the message to be sent
-        page.wait_for_timeout(1000)
-
-        # Verify the message was sent by checking if input field is cleared
-        remaining = input_field.evaluate("el => (el.value || el.innerText || '').trim()") or input_field.inner_text() or ''
-        if not remaining:
-            return { 'success': True, 'details': '消息发送成功' }
-        return { 'success': False, 'details': '消息可能未发送成功，输入框仍有内容' }
+    # Clear existing content and type the message
+    try:
+        input_field.click()
+        input_field.fill("")  # Clear existing content
+        input_field.type(message)
     except Exception as e:
-        logger(f"发送消息失败: {e}", "error")
-        raise
+        return { 'success': False, 'details': f'输入消息失败: {e}' }
+
+    # Find and click the send button
+    send_button = page.locator("div.submit:has-text('发送')").first
+    if not send_button.count():
+        return { 'success': False, 'details': '未找到发送按钮' }
+    
+    try:
+        send_button.wait_for(state="visible", timeout=3000)
+        send_button.click()
+    except Exception as e:
+        return { 'success': False, 'details': f'点击发送按钮失败: {e}' }
+
+    # Wait a moment for the message to be sent
+    page.wait_for_timeout(1000)
+
+    # Verify the message was sent by checking if input field is cleared
+    remaining = input_field.evaluate("el => (el.value || el.innerText || '').trim()") or input_field.inner_text() or ''
+    if not remaining:
+        return { 'success': True, 'details': '消息发送成功' }
+    return { 'success': False, 'details': '消息可能未发送成功，输入框仍有内容' }
 
 
 def view_full_resume_action(page, chat_id: str) -> Dict[str, Any]:
@@ -196,57 +192,49 @@ def view_full_resume_action(page, chat_id: str) -> Dict[str, Any]:
 
 def discard_candidate_action(page, chat_id: str, *, logger=lambda msg, level: None) -> Dict[str, Any]:
     """丢弃候选人 - 点击"不合适"按钮"""
+    _, error = _prepare_chat_page(page, chat_id)
+    if error:
+        return error
+
+    # 查找"不合适"按钮
+    not_fit_button = page.locator("div.not-fit-wrap").first
+    if not not_fit_button.count():
+        return { 'success': False, 'details': '未找到"不合适"按钮' }
+    
     try:
-        _, error = _prepare_chat_page(page, chat_id)
-        if error:
-            return error
-
-        # 查找"不合适"按钮
-        not_fit_button = page.locator("div.not-fit-wrap").first
-        if not not_fit_button.count():
-            return { 'success': False, 'details': '未找到"不合适"按钮' }
-        
-        try:
-            not_fit_button.wait_for(state="visible", timeout=3000)
-            not_fit_button.click()
-        except Exception as e:
-            return { 'success': False, 'details': f'点击"不合适"按钮失败: {e}' }
-
-        # 等待确认对话框
-        try:
-            confirm_button = page.locator("button:has-text('确定'), span:has-text('确定'), a:has-text('确定')").first
-            confirm_button.wait_for(state="visible", timeout=3000)
-            confirm_button.click()
-        except Exception as e:
-            return { 'success': False, 'details': f'确认丢弃失败: {e}' }
-
-        # 验证操作成功
-        page.wait_for_timeout(1000)
-        return { 'success': True, 'details': '候选人已丢弃' }
+        not_fit_button.wait_for(state="visible", timeout=3000)
+        not_fit_button.click()
     except Exception as e:
-        logger(f"丢弃候选人失败: {e}", "error")
-        raise
+        return { 'success': False, 'details': f'点击"不合适"按钮失败: {e}' }
+
+    # 等待确认对话框
+    try:
+        confirm_button = page.locator("button:has-text('确定'), span:has-text('确定'), a:has-text('确定')").first
+        confirm_button.wait_for(state="visible", timeout=3000)
+        confirm_button.click()
+    except Exception as e:
+        return { 'success': False, 'details': f'确认丢弃失败: {e}' }
+
+    # 验证操作成功
+    page.wait_for_timeout(1000)
+    return { 'success': True, 'details': '候选人已丢弃' }
 
 
 def get_candidates_list_action(page, limit: int = 10, *, logger=lambda msg, level: None, black_companies=None, save_candidates_func=None):
     """获取候选人列表"""
     logger(f"获取候选人列表 (限制: {limit})", "info")
     
+    # 等待加载提示消失
     try:
-        # 等待加载提示消失
-        try:
-            page.wait_for_function(
-                "() => !document.body.innerText.includes('加载中，请稍候')",
-                timeout=30000
-            )
-        except Exception:
-            pass
-        
-        # DOM 提取
-        candidates = extract_candidates(page, limit=limit, logger=logger)
-    except Exception as e:
-        logger(f"获取候选人列表失败: {e}", "error")
-        raise
+        page.wait_for_function(
+            "() => !document.body.innerText.includes('加载中，请稍候')",
+            timeout=30000
+        )
+    except Exception:
+        pass
+    
+    # DOM 提取
+    candidates = extract_candidates(page, limit=limit, logger=logger)
     
     # 黑名单过滤（如果存在）
     if candidates and black_companies:
@@ -265,44 +253,41 @@ def get_messages_list_action(page, limit: int = 10, *, logger=lambda msg, level:
     """获取消息列表"""
     logger(f"获取消息列表 (限制: {limit})", "info")
     
-    try:
-        messages = extract_messages(page, limit=limit, chat_cache=chat_cache.get_all() if chat_cache else None)
-        if not messages and chat_cache:
-            # 使用事件管理器获取缓存的消息
-            messages = chat_cache.get_all()
-        if not messages:
-            logger("消息列表为空（DOM+缓存均无）", "warning")
-        logger(f"成功获取 {len(messages)} 条消息", "success")
-        return messages
-    except Exception as e:
-        logger(f"获取消息列表失败: {e}", "error")
-        raise
+    messages = extract_messages(page, limit=limit, chat_cache=chat_cache.get_all() if chat_cache else None)
+    if not messages and chat_cache:
+        # 使用事件管理器获取缓存的消息
+        messages = chat_cache.get_all()
+    if not messages:
+        logger("消息列表为空（DOM+缓存均无）", "warning")
+    logger(f"成功获取 {len(messages)} 条消息", "success")
+    return messages
 
 
 def get_chat_history_action(page, chat_id: str, *, logger=lambda msg, level: None) -> List[Dict[str, Any]]:
     """读取右侧聊天历史，返回结构化消息列表"""
-    try:
-        history = extract_chat_history(page, chat_id)
-        return history
-    except Exception as e:
-        logger(f"获取聊天历史失败: {e}", "error")
-        raise
+    _, error = _prepare_chat_page(page, chat_id)
+    if error:
+        return []
+    
+    history = extract_chat_history(page, chat_id)
+    return history
 
 
 
 
 def view_online_resume_action(page, chat_id: str, *, logger=lambda msg, level: None) -> Dict[str, Any]:
     """点击会话 -> 点击"在线简历" -> 使用多级回退链条输出文本或图像"""
-    try:
-        result = capture_resume_from_chat(page, chat_id, logger=logger)
-        # 统一加上success存在性
-        if not isinstance(result, dict):
-            return { 'success': False, 'details': '未知错误: 结果类型异常' }
-        if 'success' not in result:
-            result['success'] = bool(result.get('text') or result.get('image_base64') or result.get('data_url'))
-        return result
-    except Exception as e:
-        logger(f"获取在线简历失败: {e}", "error")
-        raise
+    _, error = _prepare_chat_page(page, chat_id)
+    if error:
+        return error
+
+    result = capture_resume_from_chat(page, chat_id, logger=logger)
+    # 统一加上success存在性
+    if not isinstance(result, dict):
+        return { 'success': False, 'details': '未知错误: 结果类型异常' }
+    if 'success' not in result:
+        result['success'] = bool(result.get('text') or result.get('image_base64') or result.get('data_url'))
+    return result
+
 
 
