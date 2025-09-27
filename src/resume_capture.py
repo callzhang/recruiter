@@ -1,17 +1,15 @@
 """
-Resume capture helpers: robust multi-step pipeline to extract text or image
-from a WASM-driven canvas-based resume viewer embedded in an iframe.
+Resume capture helpers: robust multi-step pipeline to extract structured
+resume text from the WASM-driven viewer embedded in an iframe.
 
 Primary entrypoint: capture_resume_from_chat(page, chat_id, logger=None)
 
 Steps (in order):
 - open chat and click "在线简历"
-- locate iframe ('c-resume') and get frame
-- try WASM exports (get_export_geek_detail_info, callbacks)
-- install canvas text hooks and rebuild lines
-- capture canvas.toDataURL
-- capture tiled screenshots inside the iframe
-- element screenshot fallback of container
+- locate iframe ('c-resume') or inline resume container
+- tap iframe→parent postMessage payloads
+- query WASM exports / triggers for JSON data
+- install canvas & clipboard hooks as defensive fallbacks
 
 This module is intentionally verbose and defensive.
 """
@@ -20,11 +18,13 @@ from __future__ import annotations
 
 import re, json
 import time
-import base64
 from textwrap import dedent
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, TYPE_CHECKING
 
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+if TYPE_CHECKING:
+    from playwright.sync_api import Frame
 
 try:
     from .chat_utils import close_overlay_dialogs
@@ -425,9 +425,7 @@ def _try_open_online_resume(page, chat_id: str, logger=None) -> Dict[str, Any]:
         from .chat_utils import close_overlay_dialogs
     except ImportError:
         from chat_utils import close_overlay_dialogs
-    closed = close_overlay_dialogs(page, logger)
-    if closed:
-        _log(logger, "info", "已关闭遮挡的弹出层")
+    close_overlay_dialogs(page, logger)
 
     # Focus the chat item
     target = None
@@ -1141,231 +1139,6 @@ def _try_trigger_copy_buttons(frame, logger=None) -> None:
             continue
 
 
-def _capture_canvas_data_url(frame, logger=None) -> Optional[Dict[str, Any]]:
-    if frame is None:
-        return None
-    try:
-        ch = None
-        try:
-            ch = frame.query_selector("canvas#resume")
-        except Exception:
-            ch = None
-        if ch is not None:
-            data_url = ch.evaluate("c => c && c.toDataURL('image/png')")
-            width = ch.evaluate("c => c && c.width || 0") or 0
-            height = ch.evaluate("c => c && c.height || 0") or 0
-            return {
-                'image_base64': data_url.split(',', 1)[1],
-                'data_url': data_url,
-                'width': int(width),
-                'height': int(height),
-                'details': '来自canvas.toDataURL整张画布'
-            }
-    except Exception as e:
-        _log(logger, "error", f"canvas.toDataURL整张画布失败: {e}")
-    return None
-
-
-def _capture_tiled_screenshots(frame, iframe_handle, logger=None) -> Optional[Dict[str, Any]]:
-    if frame is None or iframe_handle is None:
-        return None
-    try:
-        total_h = frame.evaluate("() => (document.querySelector('canvas#resume')||{}).height || document.documentElement.scrollHeight || document.body.scrollHeight || 0") or 0
-        view_h = frame.evaluate("() => window.innerHeight || document.documentElement.clientHeight || 0") or 1000
-        step = max(600, int(view_h * 0.9))
-        slices = []
-        container_loc = frame.locator("div#resume").first
-        use_container = False
-        try:
-            use_container = container_loc.count() > 0
-        except Exception:
-            use_container = False
-
-        y = 0
-        iter_guard = 0
-        # 安装绘图监听钩子
-        try:
-            frame.evaluate("""
-                () => {
-                    if (!window.__drawTick) window.__drawTick = 0;
-                    const p = CanvasRenderingContext2D.prototype;
-                    if (!p.__patched) {
-                        ['drawImage','fillText','strokeText','fill','stroke','clearRect'].forEach(k=>{
-                            const o = p[k]; 
-                            if (typeof o !== 'function') return;
-                            p[k] = function(...a){ 
-                                try{ window.__drawTick++; }catch(_){} 
-                                return o.apply(this,a); 
-                            };
-                        });
-                        p.__patched = true;
-                    }
-                    return window.__drawTick || 0;
-                }
-            """)
-        except Exception:
-            pass
-
-        while y < max(total_h, view_h) and iter_guard < 200:
-            iter_guard += 1
-            
-            # 记录滚动前的绘图计数
-            tick_before = 0
-            try:
-                tick_before = frame.evaluate("() => window.__drawTick || 0")
-            except Exception:
-                pass
-            
-            try:
-                # 更智能的滚动策略
-                actual_scroll = frame.evaluate(
-                    """
-                    (y) => {
-                      const can = document.querySelector('canvas#resume');
-                      const candidates = [
-                        document.querySelector('div#resume'),
-                        can && can.parentElement,
-                        document.querySelector('.boss-layer__wrapper'),
-                        document.querySelector('.dialog-wrap'),
-                        document.scrollingElement,
-                        document.documentElement,
-                        document.body
-                      ].filter(Boolean);
-                      
-                      // 找到有滚动能力的容器
-                      const scroller = candidates.find(el => 
-                        el.scrollHeight - el.clientHeight > 10
-                      ) || document.documentElement;
-                      
-                      let scrolled = false;
-                      if (typeof scroller.scrollTo === 'function') {
-                        scroller.scrollTo(0, y);
-                        scrolled = true;
-                      } else {
-                        try { 
-                          scroller.scrollTop = y; 
-                          scrolled = true;
-                        } catch(e) {}
-                      }
-                      
-                      // 发送多种事件来触发重绘
-                      const target = document.querySelector('div#resume') || can || scroller;
-                      if (target) {
-                        try {
-                          target.dispatchEvent(new WheelEvent('wheel', {
-                            deltaY: 200,
-                            bubbles: true
-                          }));
-                          target.dispatchEvent(new Event('scroll', { bubbles: true }));
-                        } catch(e) {}
-                      }
-                      
-                      // 尝试键盘事件
-                      try {
-                        document.body.focus();
-                        document.dispatchEvent(new KeyboardEvent('keydown', {
-                          key: 'PageDown',
-                          code: 'PageDown',
-                          bubbles: true
-                        }));
-                      } catch(e) {}
-                      
-                      return {
-                        scrolled: scrolled,
-                        scrollTop: scroller.scrollTop,
-                        scrollHeight: scroller.scrollHeight,
-                        clientHeight: scroller.clientHeight,
-                        target: scroller.tagName + (scroller.className ? '.' + scroller.className : '')
-                      };
-                    }
-                    """,
-                    y,
-                )
-                if actual_scroll and isinstance(actual_scroll, dict) and logger:
-                    logger.info(f"滚动到 {y}, 容器: {actual_scroll.get('target', 'unknown')}, scrollTop: {actual_scroll.get('scrollTop', 0)}")
-                
-            except Exception as e:
-                if logger:
-                    logger.error(f"滚动失败: {e}")
-                break
-            
-            # 等待绘图更新或超时
-            update_detected = False
-            try:
-                frame.wait_for_function(
-                    f"() => (window.__drawTick || 0) > {tick_before}",
-                    timeout=1500
-                )
-                update_detected = True
-                if logger:
-                    logger.info(f"检测到绘图更新 (tick: {tick_before} -> ?)")
-            except Exception:
-                # 如果没有检测到绘图更新，继续但增加等待时间
-                try:
-                    frame.wait_for_timeout(150)
-                except Exception:
-                    pass
-            try:
-                if use_container:
-                    img_bytes = container_loc.screenshot()
-                else:
-                    img_bytes = iframe_handle.screenshot()
-                b64 = base64.b64encode(img_bytes).decode('utf-8')
-                slices.append(b64)
-                if logger:
-                    logger.info(f"截图 {iter_guard} 完成 (位置: {y})")
-            except Exception as e:
-                if logger:
-                    logger.error(f"截图失败: {e}")
-                break
-            y += step
-        if slices:
-            width_px = 0
-            try:
-                width_px = int(frame.evaluate("() => (document.querySelector('canvas#resume')||{}).width || document.documentElement.clientWidth || window.innerWidth || 0") or 0)
-            except Exception:
-                width_px = 0
-            return {
-                'image_base64': slices[0],
-                'images_base64': slices,
-                'data_url': None,
-                'width': width_px,
-                'height': int(total_h or 0),
-                'details': f'平铺截图切片 {len(slices)} 段'
-            }
-    except Exception:
-        pass
-    return None
-
-
-def _element_screenshot_fallback(page, frame, logger=None) -> Optional[Dict[str, Any]]:
-    if frame is None:
-        return None
-    try:
-        container = frame.locator("div#resume").first
-        handle = container.element_handle()
-        dims = container.bounding_box() or {}
-        width = int(dims.get('width') or 0)
-        height = int(dims.get('height') or 0)
-        # Expand viewport to avoid gray area
-        try:
-            page.set_viewport_size({"width": width + 200, "height": height + 200})
-            time.sleep(2)
-        except Exception:
-            pass
-        shot = handle.screenshot()
-        b64 = base64.b64encode(shot).decode('utf-8')
-        return {
-            'image_base64': b64,
-            'data_url': None,
-            'width': width,
-            'height': height,
-            'details': '容器元素截图（可能受限于可视区域）'
-        }
-    except Exception:
-        return None
-
-
 def capture_resume_from_chat(page, chat_id: str, logger=None) -> Dict[str, Any]:
     """Main resume capture function - orchestrates the capture process.
     
@@ -1373,7 +1146,6 @@ def capture_resume_from_chat(page, chat_id: str, logger=None) -> Dict[str, Any]:
         page: Playwright page object
         chat_id: Chat ID to capture resume from
         logger: Optional logger for debug info
-        capture_method: Method to use for capture ("auto", "wasm", "image")
     """
 
     # stop 0: inject wasm route
@@ -1406,7 +1178,6 @@ def capture_resume_from_chat(page, chat_id: str, logger=None) -> Dict[str, Any]:
 
     elif mode == 'iframe' and frame:
         """Handle iframe resume capture."""
-        iframe_handle = context_info.get('iframe_handle')
 
         # Collect any iframe→parent messages first; the postMessage often contains raw JSON.
         parent_result = _collect_parent_messages(page, logger)
@@ -1433,11 +1204,11 @@ def capture_resume_from_chat(page, chat_id: str, logger=None) -> Dict[str, Any]:
         error = '\n'.join(filter(None, [result.get('error', '') for result in results]))
 
         # Close any overlay dialogs including resume frames
-        # closed = close_overlay_dialogs(
-        #     page, 
-        #     add_notification=lambda msg, level: _log(logger, level, msg),
-        #     timeout_ms=1000
-        # )
+        close_overlay_dialogs(
+            page, 
+            logger=lambda msg, level: _log(logger, level, msg),
+            timeout_ms=1000
+        )
         
         return {
             'success': success,
@@ -1446,51 +1217,6 @@ def capture_resume_from_chat(page, chat_id: str, logger=None) -> Dict[str, Any]:
             'error': error
         }
     return _create_error_result(context_info, 'iframe不可用')
-
-
-
-def _compose_details(label: str, payload_details: Optional[str], capture_method: str) -> str:
-    base = (payload_details or '').strip()
-    if base:
-        return f"{base} - 方法:{capture_method}"
-    return f"{label} - 方法:{capture_method}"
-
-
-def _run_image_strategies(
-    page,
-    frame,
-    iframe_handle,
-    capture_method: str,
-    logger=None,
-) -> Optional[Dict[str, Any]]:
-    attempts = [
-        (
-            'Canvas toDataURL',
-            lambda: _capture_canvas_data_url(frame, logger),
-            _create_image_result,
-        ),
-        (
-            '平铺截图',
-            lambda: _capture_tiled_screenshots(frame, iframe_handle, logger),
-            _create_tiled_result,
-        ),
-    ]
-
-    if page is not None:
-        attempts.append(
-            (
-                '容器元素截图',
-                lambda: _element_screenshot_fallback(page, frame, logger),
-                _create_image_result,
-            )
-        )
-
-    for label, getter, formatter in attempts:
-        payload = getter()
-        if payload:
-            details = _compose_details(label, payload.get('details'), capture_method)
-            return formatter(payload, details)
-    return None
 
 
 
@@ -1523,89 +1249,137 @@ def _try_clipboard_hooks(frame, logger=None) -> Dict[str, Any]:
     return {'success': False, 'error': '剪贴板拦截失败', 'method': '剪贴板拦截'}
 
 
-def _create_image_result(data_url_ret: Dict[str, Any], details: str) -> Dict[str, Any]:
-    """Create standardized image result."""
-    return {
-        'success': True,
-        'text': None,
-        'html': None,
-        'image_base64': data_url_ret.get('image_base64'),
-        'data_url': data_url_ret.get('data_url'),
-        'width': data_url_ret.get('width', 0),
-        'height': data_url_ret.get('height', 0),
-        'details': details
-    }
+def extract_pdf_viewer_text(frame: 'Frame') -> Dict[str, Any]:
+    """Return structured text extracted from a pdf.js viewer iframe."""
+    if frame is None:
+        return {'pages': [], 'text': ''}
 
-
-def _create_tiled_result(tiled_ret: Dict[str, Any], details: str) -> Dict[str, Any]:
-    """Create standardized tiled result."""
-    return {
-        'success': True,
-        'text': None,
-        'html': None,
-        'images_base64': tiled_ret.get('images_base64', []),
-        'width': tiled_ret.get('width', 0),
-        'height': tiled_ret.get('height', 0),
-        'details': details
-    }
-
-
-
-
-def group_text_logs_to_lines(logs: list[dict], y_tolerance: int = 4) -> Dict[str, Any]:
-    """Pure-Python grouping of text draw logs into lines.
-    Each item in logs is expected to be a dict with keys: t (text), x, y.
-    Returns { text, html, lineCount, itemCount } similar to the JS rebuild.
-    """
     try:
-        safe_logs = []
-        for it in logs or []:
-            try:
-                safe_logs.append({
-                    't': str(it.get('t', '')),
-                    'x': float(it.get('x', 0) or 0),
-                    'y': float(it.get('y', 0) or 0),
-                })
-            except Exception:
-                continue
-        safe_logs.sort(key=lambda d: (d['y'], d['x']))
+        frame.locator("div.textLayer").first.wait_for(state="visible", timeout=5000)
+    except Exception:
+        pass
 
-        lines = []
-        for it in safe_logs:
-            last = lines[-1] if lines else None
-            if not last or abs(last['y'] - it['y']) > y_tolerance:
-                lines.append({'y': it['y'], 'parts': [it]})
-            else:
-                last['parts'].append(it)
+    def _collect() -> Any:
+        script = dedent(
+            """
+            (async () => {
+              const app = window.PDFViewerApplication;
+              if (!app || !app.pdfDocument) {
+                return { __error: 'pdfDocument not ready' };
+              }
 
-        def _esc(s: str) -> str:
-            return (
-                s.replace('&', '&amp;')
-                 .replace('<', '&lt;')
-                 .replace('>', '&gt;')
-            )
+              const doc = app.pdfDocument;
+              const viewer = app.pdfViewer;
+              const scale = viewer && viewer._currentScale ? viewer._currentScale : 1;
+              const results = [];
 
-        html_lines = []
-        text_lines = []
-        for line in lines:
-            parts = line['parts']
-            txt = ''.join(str(p.get('t', '')) for p in parts)
-            text_lines.append(txt)
-            html_lines.append(f"<div>{_esc(txt)}</div>")
+              for (let pageIndex = 1; pageIndex <= doc.numPages; pageIndex++) {
+                const page = await doc.getPage(pageIndex);
+                const viewport = page.getViewport({ scale });
+                const textContent = await page.getTextContent();
 
-        html = "\n".join(html_lines)
-        text = "\n".join(text_lines)
-        return {
-            'text': text,
-            'html': html,
-            'lineCount': len(lines),
-            'itemCount': len(safe_logs),
-        }
+                const items = textContent.items
+                  .map(item => {
+                    const [x, y] = viewport.convertToViewportPoint(item.transform[4], item.transform[5]);
+                    const height = item.height || Math.abs(item.transform[3]) || 1;
+                    const width = item.width || Math.abs(item.transform[0]) || 1;
+                    return {
+                      text: item.str,
+                      x,
+                      y,
+                      height,
+                      width,
+                    };
+                  })
+                  .filter(entry => entry.text && entry.text.trim());
+
+                items.sort((a, b) => {
+                  if (Math.abs(a.y - b.y) > 2) {
+                    return a.y - b.y;
+                  }
+                  return a.x - b.x;
+                });
+
+                const lines = [];
+                let currentY = null;
+                let buffer = [];
+                let tolerance = 6;
+                if (items.length) {
+                  const heights = items.map(s => s.height).filter(Boolean);
+                  const avg = heights.reduce((acc, val) => acc + val, 0) / heights.length;
+                  tolerance = Math.max(6, avg * 0.8);
+                }
+
+                const flush = () => {
+                  if (!buffer.length) return;
+                  const joined = buffer
+                    .join(' ')
+                    .replace(/\u00a0/g, ' ')
+                    .replace(/\s+/g, ' ')
+                    .trim();
+                  if (joined) {
+                    lines.push(joined);
+                  }
+                  buffer = [];
+                };
+
+                for (const item of items) {
+                  if (currentY === null) {
+                    currentY = item.y;
+                  }
+                  if (Math.abs(item.y - currentY) > tolerance) {
+                    flush();
+                    currentY = item.y;
+                  }
+                  buffer.push(item.text);
+                }
+                flush();
+
+                results.push({ page: pageIndex, lines, text: lines.join('\n') });
+              }
+
+              return results;
+            })()
+            """
+        ).strip()
+        return frame.evaluate(script)
+
+    try:
+        pages: Any = _collect() 
     except Exception as e:
-        return {
-            'text': '',
-            'html': '',
-            'lineCount': 0,
-            'itemCount': 0,
-            'error': str(e)
-        }
+        pages = []
+        print(f"extract_pdf_viewer_text: {e}")
+        fallback = frame.evaluate("() => document.body.innerText || ''")
+        fallback = clean_resume_text(fallback)
+        return {'pages': [], 'text': fallback}
+
+    if isinstance(pages, dict):
+        if '__error' in pages:
+            pages = []
+        else:
+            pages = [pages]
+
+    combined: list[str] = []
+    for page_data in pages:
+        for line in page_data.get('lines', []) or []:
+            if line:
+                combined.append(line)
+
+
+    cleaned_text = clean_resume_text('\n'.join(combined))
+    return {'pages': pages, 'text': cleaned_text}
+
+
+# Clean up the combined text before returning.
+import re
+
+def clean_resume_text(text: str) -> str:
+    # Replace triple or more newlines with a unique marker to preserve them
+    text = re.sub(r'\n{3,}', '<TRIPLE_NL>', text)
+    # Replace double newlines and single newlines with nothing (collapse)
+    text = re.sub(r'\n{2,}', '', text)
+    text = re.sub(r'\n\s\n', '', text)
+    text = re.sub(r'\n', '', text)
+    # Restore triple newlines
+    text = text.replace('<TRIPLE_NL>', '\n\n')
+    return text
