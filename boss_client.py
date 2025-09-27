@@ -165,6 +165,10 @@ class BossClientOptimized:
         """获取消息列表"""
         return self._make_request('GET', '/messages', params={'limit': limit})
     
+    def get_recommended_candidates(self, limit: int = 20) -> Dict[str, Any]:
+        """获取推荐候选人列表"""
+        return self._make_request('GET', '/candidates/recommended', params={'limit': limit})
+    
     def get_chat_history(self, chat_id: str) -> Dict[str, Any]:
         """获取聊天历史"""
         return self._make_request('GET', '/messages/history', params={'chat_id': chat_id})
