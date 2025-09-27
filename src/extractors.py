@@ -10,15 +10,8 @@ from typing import Any, Dict, List
 from src import page_selectors as sel
 
 
-def extract_candidates(page, limit: int, add_notification=None) -> List[Dict[str, Any]]:
+def extract_candidates(page, limit: int, logger=lambda msg, level: None) -> List[Dict[str, Any]]:
     candidates = []
-
-    def _notify(msg: str, level: str = "info"):
-        try:
-            if callable(add_notification):
-                add_notification(msg, level)
-        except Exception:
-            pass
 
     selectors = sel.conversation_list_items()
 
@@ -26,7 +19,7 @@ def extract_candidates(page, limit: int, add_notification=None) -> List[Dict[str
         try:
             elements = page.locator(selector).all()
             if elements:
-                _notify(f"使用选择器 {selector} 找到 {len(elements)} 个元素", "info")
+                logger(f"使用选择器 {selector} 找到 {len(elements)} 个元素", "info")
                 for i, elem in enumerate(elements[:limit]):
                     try:
                         text = elem.inner_text().strip()
