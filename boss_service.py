@@ -166,7 +166,7 @@ class BossService:
                     'timestamp': datetime.now().isoformat()
                 })
         
-        @self.app.get('/candidates')
+        @self.app.get('/chat/candidates')
         def get_candidates(limit: int = Query(10, ge=1, le=100)):
             try:
                 # 确保浏览器会话正常
@@ -195,7 +195,7 @@ class BossService:
                     'timestamp': datetime.now().isoformat()
                 })
 
-        @self.app.get('/candidates/recommended')
+        @self.app.get('/recommend/candidates')
         def get_recommended_candidates(limit: int = Query(20, ge=1, le=100)):
             """获取推荐候选人列表"""
             self._ensure_browser_session()
@@ -205,22 +205,16 @@ class BossService:
                 self.add_notification(f"获取推荐候选人失败: {e}", "error")
                 raise
 
-                candidates = result.get('candidates', []) or []
-                if result.get('success'):
-                    self.add_notification(f"成功获取 {len(candidates)} 个推荐候选人", "success")
-                else:
-                    self.add_notification(result.get('details', '未找到推荐候选人'), "warning")
+            candidates = result.get('candidates', [])
+            return JSONResponse({
+                'success': result.get('success', False),
+                'candidates': candidates,
+                'count': len(candidates),
+                'details': result.get('details', ''),
+                'timestamp': datetime.now().isoformat()
+            })
 
-                candidates = result.get('candidates', [])
-                return JSONResponse({
-                    'success': result.get('success', False),
-                    'candidates': candidates,
-                    'count': len(candidates),
-                    'details': result.get('details', ''),
-                    'timestamp': datetime.now().isoformat()
-                })
-
-        @self.app.get('/messages')
+        @self.app.get('/chat/dialogs')
         def get_messages(limit: int = Query(10, ge=1, le=100)):
             try:
                 # 确保浏览器会话正常
@@ -277,10 +271,10 @@ class BossService:
                     'timestamp': datetime.now().isoformat()
                 })
         
-        @self.app.post('/greet')
-        def greet_candidate(candidate_id: int, message: str | None = None):
+        @self.app.post('/chat/{chat_id}/greet')
+        def greet_candidate(chat_id: str, message: str | None = None):
             try:
-                result = self.send_greeting(candidate_id, message or '您好，我对您的简历很感兴趣，希望能进一步沟通。')
+                result = self.send_greeting(chat_id, message or '您好，我对您的简历很感兴趣，希望能进一步沟通。')
                 return JSONResponse({
                     'success': result,
                     'message': '打招呼成功' if result else '打招呼失败',
@@ -293,21 +287,6 @@ class BossService:
                     'timestamp': datetime.now().isoformat()
                 })
         
-        @self.app.get('/resume')
-        def get_resume(candidate_id: int):
-            try:
-                resume = self.get_candidate_resume(candidate_id)
-                return JSONResponse({
-                    'success': True,
-                    'resume': resume,
-                    'timestamp': datetime.now().isoformat()
-                })
-            except Exception as e:
-                return JSONResponse({
-                    'success': False,
-                    'error': str(e),
-                    'timestamp': datetime.now().isoformat()
-                })
 
         @self.app.post('/resume/request')
         def request_resume_api(chat_id: str = Body(..., embed=True)):
@@ -330,8 +309,8 @@ class BossService:
                     'timestamp': datetime.now().isoformat()
                 })
 
-        @self.app.post('/messages/send')
-        def send_message_api(chat_id: str = Body(..., embed=True), message: str = Body(..., embed=True)):
+        @self.app.post('/chat/{chat_id}/send')
+        def send_message_api(chat_id: str, message: str = Body(..., embed=True)):
             """发送文本消息到指定对话"""
             try:
                 # 确保浏览器会话和登录
@@ -352,8 +331,8 @@ class BossService:
                     'timestamp': datetime.now().isoformat()
                 })
 
-        @self.app.get('/messages/history')
-        def get_message_history(chat_id: str = Query(...)):
+        @self.app.get('/chat/{chat_id}/messages')
+        def get_message_history(chat_id: str):
             """获取指定会话的聊天历史（右侧面板）"""
             try:
                 # 确保会话
@@ -419,9 +398,7 @@ class BossService:
                 chat_id: 聊天ID
             """
             # 会话与登录
-            # self._ensure_browser_session()
-            # if not self.is_logged_in and not self.ensure_login():
-            #     raise Exception("未登录")
+            self._ensure_browser_session()
 
             result = view_online_resume_action(self.page, chat_id, logger=self.add_notification)
             return JSONResponse({
@@ -439,6 +416,27 @@ class BossService:
                 'timestamp': datetime.now().isoformat(),
                 'capture_method': result.get('capture_method'),
             })
+
+        @self.app.post('/resume/accept')
+        def accept_resume_api(chat_id: str = Body(..., embed=True)):
+            """接受候选人 - 点击"接受"按钮"""
+            try:
+                # 确保浏览器会话和登录
+                self._ensure_browser_session()
+                
+                result = accept_resume_action(self.page, chat_id, logger=self.add_notification)
+                return JSONResponse({
+                    'success': result.get('success', False),
+                    'chat_id': chat_id,
+                    'details': result.get('details', ''),
+                    'timestamp': datetime.now().isoformat()
+                })
+            except Exception as e:
+                return JSONResponse({
+                    'success': False,
+                    'error': str(e),
+                    'timestamp': datetime.now().isoformat()
+                })
 
         
         @self.app.post('/restart')
@@ -800,7 +798,7 @@ class BossService:
             
             try:
                 # If the current page is on chat URL, check login status
-                if settings.CHAT_URL in self.page.url and "加载中" not in self.page.content():
+                if settings.BASE_URL in self.page.url and "加载中" not in self.page.content():
                     page_text = self.page.locator("body").inner_text()
                     # More comprehensive login detection
                     login_indicators = ["消息", "聊天", "对话", "沟通", "候选人", "简历", "打招呼"]
@@ -871,7 +869,7 @@ class BossService:
                     # If we reached the chat page directly, wait for it to load
                     self.add_notification("等待聊天页面加载...", "info")
                     self.page.wait_for_url(
-                        lambda url: settings.CHAT_URL in url,
+                        settings.BASE_URL,
                         timeout=6000, # 10 minutes
                     )
                 
@@ -891,290 +889,7 @@ class BossService:
                 self.add_notification(traceback.format_exc(), "error")
                 raise Exception("登录失败")
 
-    
-    def send_greeting(self, candidate_id, message):
-        """发送打招呼消息"""
-        print(f"[*] 向候选人 {candidate_id} 发送打招呼消息")
-        # TODO: 实现打招呼逻辑
-        return True
-    
-    def get_candidate_resume(self, candidate_id):
-        """获取候选人简历"""
-        # 确保浏览器会话正常
-        self._ensure_browser_session()
-        
-        if not self.is_logged_in:
-            raise Exception("未登录")
-        
-        self.add_notification(f"获取候选人 {candidate_id} 的简历", "info")
-        
-        try:
-            # 访问聊天页面
-            self.page.goto(
-                settings.BASE_URL.rstrip('/') + "/web/chat/index",
-                wait_until="domcontentloaded",
-                timeout=60000
-            )
-            
-            # 等待页面加载
-            try:
-                self.page.wait_for_load_state("networkidle", timeout=10000)
-            except Exception:
-                pass
-            try:
-                self.page.wait_for_load_state("networkidle", timeout=3000)
-            except Exception:
-                pass
-            
-            # 查找指定候选人的对话项
-            candidates = get_candidates_list_action(
-                self.page, 
-                limit=50, 
-                logger=self.add_notification,
-                black_companies=getattr(self, 'black_companies', None),
-                save_candidates_func=self.save_candidates_to_file
-            )  # 获取更多候选人
-            target_candidate = None
-            
-            for candidate in candidates:
-                if candidate.get('id') == candidate_id:
-                    target_candidate = candidate
-                    break
-            
-            if not target_candidate:
-                raise Exception(f"未找到候选人 {candidate_id}")
-            
-            # 点击候选人对话项
-            selectors = sel.conversation_list_items()
-            clicked = False
-            
-            for selector in selectors:
-                try:
-                    elements = self.page.locator(selector).all()
-                    if elements and len(elements) >= candidate_id:
-                        # 点击对应的候选人
-                        elements[candidate_id - 1].click()
-                        clicked = True
-                        self.add_notification(f"已点击候选人 {candidate_id}", "info")
-                        break
-                except Exception as e:
-                    self.add_notification(f"选择器 {selector} 点击失败: {e}", "warning")
-                    continue
-            
-            if not clicked:
-                raise Exception("无法点击候选人对话项")
-            
-            # 等待聊天窗口加载
-            try:
-                self.page.wait_for_load_state("networkidle", timeout=3000)
-            except Exception:
-                pass
-            
-            # 查找简历相关按钮或链接
-            resume_data = {}
-            
-            # 尝试多种简历获取方式
-            resume_selectors = [
-                "xpath=//button[contains(., '简历') or contains(., '查看简历')]",
-                "xpath=//a[contains(., '简历') or contains(., '查看简历')]",
-                "xpath=//span[contains(., '简历') or contains(., '查看简历')]",
-                "button[title*='简历']",
-                "a[href*='resume']",
-                "div[class*='resume'] button",
-                "div[class*='profile'] button"
-            ]
-            
-            resume_found = False
-            for selector in resume_selectors:
-                try:
-                    resume_btn = self.page.locator(selector).first
-                    if resume_btn.count() > 0:
-                        resume_btn.click()
-                        self.add_notification("已点击简历按钮", "info")
-                        time.sleep(2)
-                        resume_found = True
-                        break
-                except Exception:
-                    continue
-            
-            if not resume_found:
-                # 尝试右键菜单或其他方式
-                try:
-                    # 在候选人头像或姓名区域右键
-                    candidate_area = self.page.locator("xpath=//div[contains(@class, 'chat') or contains(@class, 'conversation')]").first
-                    if candidate_area.count() > 0:
-                        candidate_area.click(button="right")
-                        try:
-                            self.page.wait_for_timeout(1000)
-                        except Exception:
-                            pass
-                        
-                        # 查找右键菜单中的简历选项
-                        menu_selectors = [
-                            "xpath=//div[contains(@class, 'menu')]//span[contains(., '简历')]",
-                            "xpath=//div[contains(@class, 'context')]//span[contains(., '简历')]",
-                            "xpath=//li[contains(., '简历')]"
-                        ]
-                        
-                        for menu_selector in menu_selectors:
-                            try:
-                                menu_item = self.page.locator(menu_selector).first
-                                if menu_item.count() > 0:
-                                    menu_item.click()
-                                    self.add_notification("已通过右键菜单访问简历", "info")
-                                    try:
-                                        self.page.wait_for_timeout(2000)
-                                    except Exception:
-                                        pass
-                                    resume_found = True
-                                    break
-                            except Exception:
-                                continue
-                except Exception:
-                    pass
-            
-            if resume_found:
-                    # 等待简历页面或弹窗加载
-                    try:
-                        self.page.wait_for_timeout(3000)
-                    except Exception:
-                        pass
-                    
-                    # 提取简历信息
-                    resume_info = {}
-                    
-                    # 基本信息
-                    basic_info_selectors = [
-                        "xpath=//div[contains(@class, 'resume') or contains(@class, 'profile')]//text()",
-                        "xpath=//div[contains(@class, 'info')]//text()",
-                        "xpath=//div[contains(@class, 'detail')]//text()"
-                    ]
-                    
-                    for selector in basic_info_selectors:
-                        try:
-                            elements = self.page.locator(selector).all()
-                            if elements:
-                                for elem in elements:
-                                    text = elem.inner_text().strip()
-                                    if text and len(text) > 5:
-                                        resume_info['basic_info'] = text
-                                        break
-                                if 'basic_info' in resume_info:
-                                    break
-                        except Exception:
-                            continue
-                    
-                    # 工作经历
-                    work_exp_selectors = [
-                        "xpath=//div[contains(., '工作经历') or contains(., '经验')]//following-sibling::*",
-                        "xpath=//div[contains(@class, 'experience')]//text()",
-                        "xpath=//div[contains(@class, 'work')]//text()"
-                    ]
-                    
-                    for selector in work_exp_selectors:
-                        try:
-                            elements = self.page.locator(selector).all()
-                            if elements:
-                                work_text = []
-                                for elem in elements:
-                                    text = elem.inner_text().strip()
-                                    if text and len(text) > 10:
-                                        work_text.append(text)
-                                if work_text:
-                                    resume_info['work_experience'] = work_text
-                                    break
-                        except Exception:
-                            continue
-                    
-                    # 教育背景
-                    education_selectors = [
-                        "xpath=//div[contains(., '教育') or contains(., '学历')]//following-sibling::*",
-                        "xpath=//div[contains(@class, 'education')]//text()",
-                        "xpath=//div[contains(@class, 'school')]//text()"
-                    ]
-                    
-                    for selector in education_selectors:
-                        try:
-                            elements = self.page.locator(selector).all()
-                            if elements:
-                                edu_text = []
-                                for elem in elements:
-                                    text = elem.inner_text().strip()
-                                    if text and len(text) > 5:
-                                        edu_text.append(text)
-                                if edu_text:
-                                    resume_info['education'] = edu_text
-                                    break
-                        except Exception:
-                            continue
-                    
-                    # 技能标签
-                    skill_selectors = [
-                        "xpath=//div[contains(., '技能') or contains(., '标签')]//span",
-                        "xpath=//div[contains(@class, 'skill')]//span",
-                        "xpath=//div[contains(@class, 'tag')]//span"
-                    ]
-                    
-                    for selector in skill_selectors:
-                        try:
-                            elements = self.page.locator(selector).all()
-                            if elements:
-                                skills = []
-                                for elem in elements:
-                                    text = elem.inner_text().strip()
-                                    if text and len(text) > 1:
-                                        skills.append(text)
-                                if skills:
-                                    resume_info['skills'] = skills
-                                    break
-                        except Exception:
-                            continue
-                    
-                    resume_data = {
-                        'candidate_id': candidate_id,
-                        'candidate_info': target_candidate,
-                        'resume_info': resume_info,
-                        'timestamp': datetime.now().isoformat(),
-                        'success': True
-                    }
-                    
-                    self.add_notification(f"成功获取候选人 {candidate_id} 的简历", "success")
-                    
-                    # 保存简历数据
-                    self.save_resume_to_file(resume_data)
-                    
-                else:
-                    # 如果找不到简历按钮，返回基本信息
-                    resume_data = {
-                        'candidate_id': candidate_id,
-                        'candidate_info': target_candidate,
-                        'resume_info': {'message': '无法访问详细简历，仅获取到基本信息'},
-                        'timestamp': datetime.now().isoformat(),
-                        'success': False
-                    }
-                    
-                    self.add_notification(f"未找到简历按钮，返回候选人基本信息", "warning")
-                
-                return resume_data
-                
-            except Exception as e:
-                self.add_notification(f"获取简历失败: {e}", "error")
-                raise Exception(f"获取简历失败: {e}")
-    
-    def save_resume_to_file(self, resume_data):
-        """保存简历数据到文件"""
-        try:
-            os.makedirs("data/output", exist_ok=True)
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M")
-            json_path = f"data/output/resume_{timestamp}.json"
-            
-            with open(json_path, "w", encoding="utf-8") as f:
-                json.dump(resume_data, f, ensure_ascii=False, indent=2)
-            
-            self.add_notification(f"简历数据已保存到: {json_path}", "success")
-            
-        except Exception as e:
-            self.add_notification(f"保存简历数据失败: {e}", "error")
+
     
     def _shutdown_thread(self, keep_browser=False):
         """Run graceful shutdown in a separate thread to avoid blocking."""

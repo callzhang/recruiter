@@ -163,15 +163,15 @@ class BossClientOptimized:
     
     def get_messages(self, limit: int = 10) -> Dict[str, Any]:
         """获取消息列表"""
-        return self._make_request('GET', '/messages', params={'limit': limit})
+        return self._make_request('GET', '/chat/dialogs', params={'limit': limit})
     
     def get_recommended_candidates(self, limit: int = 20) -> Dict[str, Any]:
         """获取推荐候选人列表"""
-        return self._make_request('GET', '/candidates/recommended', params={'limit': limit})
+        return self._make_request('GET', '/recommend/candidates', params={'limit': limit})
     
     def get_chat_history(self, chat_id: str) -> Dict[str, Any]:
         """获取聊天历史"""
-        return self._make_request('GET', '/messages/history', params={'chat_id': chat_id})
+        return self._make_request('GET', f'/chat/{chat_id}/messages')
     
     def request_resume(self, chat_id: str) -> Dict[str, Any]:
         """请求简历"""
@@ -179,8 +179,7 @@ class BossClientOptimized:
     
     def send_message(self, chat_id: str, message: str) -> Dict[str, Any]:
         """发送消息到指定对话"""
-        return self._make_request('POST', '/messages/send', data={
-            'chat_id': chat_id,
+        return self._make_request('POST', f'/chat/{chat_id}/send', data={
             'message': message
         })
     
