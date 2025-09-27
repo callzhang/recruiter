@@ -87,7 +87,6 @@ class BossService:
             self.playwright = None
             self.context = None # The primary browser object
             self.page = None
-            self.lock = threading.Lock()
             self.is_logged_in = False
             self.notifications = []
             self.shutdown_requested = False
@@ -170,12 +169,11 @@ class BossService:
         @self.app.get('/candidates')
         def get_candidates(limit: int = Query(10, ge=1, le=100)):
             try:
-                with self.lock:
-                    # 确保浏览器会话正常
-                    self._ensure_browser_session()
-                    
-                    if not self.is_logged_in:
-                        raise Exception("未登录")
+                # 确保浏览器会话正常
+                self._ensure_browser_session()
+                
+                if not self.is_logged_in:
+                    raise Exception("未登录")
                 
                 candidates = get_candidates_list_action(
                     self.page, 
@@ -199,14 +197,13 @@ class BossService:
 
         @self.app.get('/candidates/recommended')
         def get_recommended_candidates(limit: int = Query(20, ge=1, le=100)):
-            with self.lock:
-                """获取推荐候选人列表"""
-                self._ensure_browser_session()
-                try:
-                    result = list_recommended_candidates_action(self.page, limit=limit)
-                except Exception as e:
-                    self.add_notification(f"获取推荐候选人失败: {e}", "error")
-                    raise
+            """获取推荐候选人列表"""
+            self._ensure_browser_session()
+            try:
+                result = list_recommended_candidates_action(self.page, limit=limit)
+            except Exception as e:
+                self.add_notification(f"获取推荐候选人失败: {e}", "error")
+                raise
 
                 candidates = result.get('candidates', []) or []
                 if result.get('success'):
@@ -226,10 +223,8 @@ class BossService:
         @self.app.get('/messages')
         def get_messages(limit: int = Query(10, ge=1, le=100)):
             try:
-                with self.lock:
-                    # 确保浏览器会话正常
-                    self._ensure_browser_session()
-                    
+                # 确保浏览器会话正常
+                self._ensure_browser_session()
 
                 messages = get_messages_list_action(
                     self.page, 
@@ -671,20 +666,19 @@ class BossService:
     def save_login_state(self):
         """保存登录状态"""
         try:
-            with self.lock:
-                # 确保目录存在
-                os.makedirs(os.path.dirname(settings.STORAGE_STATE), exist_ok=True)
-                
-                # 保存当前上下文状态
-                context = self.page.context
-                context.storage_state(path=settings.STORAGE_STATE)
-                
-                self.add_notification(f"登录状态已保存到: {settings.STORAGE_STATE}", "success")
-                
-                # 标记为已登录
-                self.is_logged_in = True
-                self.add_notification("用户登录状态已确认并保存", "success")
-                return True
+            # 确保目录存在
+            os.makedirs(os.path.dirname(settings.STORAGE_STATE), exist_ok=True)
+            
+            # 保存当前上下文状态
+            context = self.page.context
+            context.storage_state(path=settings.STORAGE_STATE)
+            
+            self.add_notification(f"登录状态已保存到: {settings.STORAGE_STATE}", "success")
+            
+            # 标记为已登录
+            self.is_logged_in = True
+            self.add_notification("用户登录状态已确认并保存", "success")
+            return True
         except Exception as e:
             self.add_notification(f"保存登录状态失败: {e}", "error")
             return False
@@ -692,30 +686,29 @@ class BossService:
     def check_login_status(self):
         """检查登录状态"""
         try:
-            with self.lock:
-                # 访问聊天页面
-                self.page.goto(settings.BASE_URL.rstrip('/') + "/web/chat/index", 
+            # 访问聊天页面
+            self.page.goto(settings.BASE_URL.rstrip('/') + "/web/chat/index",
                              wait_until="domcontentloaded", timeout=10000)
-                try:
-                    self.page.wait_for_load_state("networkidle", timeout=5000)
-                except Exception:
-                    pass
+            try:
+                self.page.wait_for_load_state("networkidle", timeout=5000)
+            except Exception:
+                pass
                 
-                page_text = self.page.locator("body").inner_text()
-                current_url = self.page.url
-                # 滑块验证检测与提示
-                if "/web/user/safe/verify-slider" in current_url:
-                    self.add_notification("检测到滑块验证页面，请在浏览器中完成验证...", "warning")
-                    # 等待验证通过或超时（最多5分钟）
-                    start = time.time()
-                    while time.time() - start < 300:
-                        try:
-                            self.page.wait_for_timeout(1000)
-                            current_url = self.page.url
-                            if "/web/user/safe/verify-slider" not in current_url:
-                                break
-                        except Exception:
+            page_text = self.page.locator("body").inner_text()
+            current_url = self.page.url
+            # 滑块验证检测与提示
+            if "/web/user/safe/verify-slider" in current_url:
+                self.add_notification("检测到滑块验证页面，请在浏览器中完成验证...", "warning")
+                # 等待验证通过或超时（最多5分钟）
+                start = time.time()
+                while time.time() - start < 300:
+                    try:
+                        self.page.wait_for_timeout(1000)
+                        current_url = self.page.url
+                        if "/web/user/safe/verify-slider" not in current_url:
                             break
+                    except Exception:
+                        break
                 
                 # 检查是否在登录页面
                 if ("登录" in page_text and ("立即登录" in page_text or "登录/注册" in page_text)) or "login" in current_url.lower():
@@ -907,141 +900,140 @@ class BossService:
     
     def get_candidate_resume(self, candidate_id):
         """获取候选人简历"""
-        with self.lock:
-            # 确保浏览器会话正常
-            self._ensure_browser_session()
+        # 确保浏览器会话正常
+        self._ensure_browser_session()
+        
+        if not self.is_logged_in:
+            raise Exception("未登录")
+        
+        self.add_notification(f"获取候选人 {candidate_id} 的简历", "info")
+        
+        try:
+            # 访问聊天页面
+            self.page.goto(
+                settings.BASE_URL.rstrip('/') + "/web/chat/index",
+                wait_until="domcontentloaded",
+                timeout=60000
+            )
             
-            if not self.is_logged_in:
-                raise Exception("未登录")
-            
-            self.add_notification(f"获取候选人 {candidate_id} 的简历", "info")
-            
+            # 等待页面加载
             try:
-                # 访问聊天页面
-                self.page.goto(
-                    settings.BASE_URL.rstrip('/') + "/web/chat/index",
-                    wait_until="domcontentloaded",
-                    timeout=60000
-                )
-                
-                # 等待页面加载
+                self.page.wait_for_load_state("networkidle", timeout=10000)
+            except Exception:
+                pass
+            try:
+                self.page.wait_for_load_state("networkidle", timeout=3000)
+            except Exception:
+                pass
+            
+            # 查找指定候选人的对话项
+            candidates = get_candidates_list_action(
+                self.page, 
+                limit=50, 
+                logger=self.add_notification,
+                black_companies=getattr(self, 'black_companies', None),
+                save_candidates_func=self.save_candidates_to_file
+            )  # 获取更多候选人
+            target_candidate = None
+            
+            for candidate in candidates:
+                if candidate.get('id') == candidate_id:
+                    target_candidate = candidate
+                    break
+            
+            if not target_candidate:
+                raise Exception(f"未找到候选人 {candidate_id}")
+            
+            # 点击候选人对话项
+            selectors = sel.conversation_list_items()
+            clicked = False
+            
+            for selector in selectors:
                 try:
-                    self.page.wait_for_load_state("networkidle", timeout=10000)
-                except Exception:
-                    pass
-                try:
-                    self.page.wait_for_load_state("networkidle", timeout=3000)
-                except Exception:
-                    pass
-                
-                # 查找指定候选人的对话项
-                candidates = get_candidates_list_action(
-                    self.page, 
-                    limit=50, 
-                    logger=self.add_notification,
-                    black_companies=getattr(self, 'black_companies', None),
-                    save_candidates_func=self.save_candidates_to_file
-                )  # 获取更多候选人
-                target_candidate = None
-                
-                for candidate in candidates:
-                    if candidate.get('id') == candidate_id:
-                        target_candidate = candidate
+                    elements = self.page.locator(selector).all()
+                    if elements and len(elements) >= candidate_id:
+                        # 点击对应的候选人
+                        elements[candidate_id - 1].click()
+                        clicked = True
+                        self.add_notification(f"已点击候选人 {candidate_id}", "info")
                         break
-                
-                if not target_candidate:
-                    raise Exception(f"未找到候选人 {candidate_id}")
-                
-                # 点击候选人对话项
-                selectors = sel.conversation_list_items()
-                clicked = False
-                
-                for selector in selectors:
-                    try:
-                        elements = self.page.locator(selector).all()
-                        if elements and len(elements) >= candidate_id:
-                            # 点击对应的候选人
-                            elements[candidate_id - 1].click()
-                            clicked = True
-                            self.add_notification(f"已点击候选人 {candidate_id}", "info")
-                            break
-                    except Exception as e:
-                        self.add_notification(f"选择器 {selector} 点击失败: {e}", "warning")
-                        continue
-                
-                if not clicked:
-                    raise Exception("无法点击候选人对话项")
-                
-                # 等待聊天窗口加载
+                except Exception as e:
+                    self.add_notification(f"选择器 {selector} 点击失败: {e}", "warning")
+                    continue
+            
+            if not clicked:
+                raise Exception("无法点击候选人对话项")
+            
+            # 等待聊天窗口加载
+            try:
+                self.page.wait_for_load_state("networkidle", timeout=3000)
+            except Exception:
+                pass
+            
+            # 查找简历相关按钮或链接
+            resume_data = {}
+            
+            # 尝试多种简历获取方式
+            resume_selectors = [
+                "xpath=//button[contains(., '简历') or contains(., '查看简历')]",
+                "xpath=//a[contains(., '简历') or contains(., '查看简历')]",
+                "xpath=//span[contains(., '简历') or contains(., '查看简历')]",
+                "button[title*='简历']",
+                "a[href*='resume']",
+                "div[class*='resume'] button",
+                "div[class*='profile'] button"
+            ]
+            
+            resume_found = False
+            for selector in resume_selectors:
                 try:
-                    self.page.wait_for_load_state("networkidle", timeout=3000)
+                    resume_btn = self.page.locator(selector).first
+                    if resume_btn.count() > 0:
+                        resume_btn.click()
+                        self.add_notification("已点击简历按钮", "info")
+                        time.sleep(2)
+                        resume_found = True
+                        break
+                except Exception:
+                    continue
+            
+            if not resume_found:
+                # 尝试右键菜单或其他方式
+                try:
+                    # 在候选人头像或姓名区域右键
+                    candidate_area = self.page.locator("xpath=//div[contains(@class, 'chat') or contains(@class, 'conversation')]").first
+                    if candidate_area.count() > 0:
+                        candidate_area.click(button="right")
+                        try:
+                            self.page.wait_for_timeout(1000)
+                        except Exception:
+                            pass
+                        
+                        # 查找右键菜单中的简历选项
+                        menu_selectors = [
+                            "xpath=//div[contains(@class, 'menu')]//span[contains(., '简历')]",
+                            "xpath=//div[contains(@class, 'context')]//span[contains(., '简历')]",
+                            "xpath=//li[contains(., '简历')]"
+                        ]
+                        
+                        for menu_selector in menu_selectors:
+                            try:
+                                menu_item = self.page.locator(menu_selector).first
+                                if menu_item.count() > 0:
+                                    menu_item.click()
+                                    self.add_notification("已通过右键菜单访问简历", "info")
+                                    try:
+                                        self.page.wait_for_timeout(2000)
+                                    except Exception:
+                                        pass
+                                    resume_found = True
+                                    break
+                            except Exception:
+                                continue
                 except Exception:
                     pass
-                
-                # 查找简历相关按钮或链接
-                resume_data = {}
-                
-                # 尝试多种简历获取方式
-                resume_selectors = [
-                    "xpath=//button[contains(., '简历') or contains(., '查看简历')]",
-                    "xpath=//a[contains(., '简历') or contains(., '查看简历')]",
-                    "xpath=//span[contains(., '简历') or contains(., '查看简历')]",
-                    "button[title*='简历']",
-                    "a[href*='resume']",
-                    "div[class*='resume'] button",
-                    "div[class*='profile'] button"
-                ]
-                
-                resume_found = False
-                for selector in resume_selectors:
-                    try:
-                        resume_btn = self.page.locator(selector).first
-                        if resume_btn.count() > 0:
-                            resume_btn.click()
-                            self.add_notification("已点击简历按钮", "info")
-                            time.sleep(2)
-                            resume_found = True
-                            break
-                    except Exception:
-                        continue
-                
-                if not resume_found:
-                    # 尝试右键菜单或其他方式
-                    try:
-                        # 在候选人头像或姓名区域右键
-                        candidate_area = self.page.locator("xpath=//div[contains(@class, 'chat') or contains(@class, 'conversation')]").first
-                        if candidate_area.count() > 0:
-                            candidate_area.click(button="right")
-                            try:
-                                self.page.wait_for_timeout(1000)
-                            except Exception:
-                                pass
-                            
-                            # 查找右键菜单中的简历选项
-                            menu_selectors = [
-                                "xpath=//div[contains(@class, 'menu')]//span[contains(., '简历')]",
-                                "xpath=//div[contains(@class, 'context')]//span[contains(., '简历')]",
-                                "xpath=//li[contains(., '简历')]"
-                            ]
-                            
-                            for menu_selector in menu_selectors:
-                                try:
-                                    menu_item = self.page.locator(menu_selector).first
-                                    if menu_item.count() > 0:
-                                        menu_item.click()
-                                        self.add_notification("已通过右键菜单访问简历", "info")
-                                        try:
-                                            self.page.wait_for_timeout(2000)
-                                        except Exception:
-                                            pass
-                                        resume_found = True
-                                        break
-                                except Exception:
-                                    continue
-                    except Exception:
-                        pass
-                
-                if resume_found:
+            
+            if resume_found:
                     # 等待简历页面或弹窗加载
                     try:
                         self.page.wait_for_timeout(3000)
