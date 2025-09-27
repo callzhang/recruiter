@@ -25,7 +25,19 @@ from src.config import settings
 from src.utils import export_records
 from src.chat_utils import ensure_on_chat_page, find_chat_item
 from src.extractors import extract_candidates, extract_messages, extract_chat_history
-from src.actions import request_resume_action, send_message_action, view_resume_action
+from src.chat_actions import (
+    request_resume_action,
+    send_message_action,
+    view_resume_action,
+    discard_candidate_action,
+    get_candidates_list_action,
+    get_messages_list_action,
+    get_chat_history_action,
+    view_online_resume_action,
+)
+from src.recommendation_actions import (
+    list_recommended_candidates_action,
+)
 from src import page_selectors as sel
 from src.blacklist import load_blacklist, NEGATIVE_HINTS
 from src.events import EventManager
@@ -158,7 +170,20 @@ class BossService:
         @self.app.get('/candidates')
         def get_candidates(limit: int = Query(10, ge=1, le=100)):
             try:
-                candidates = self.get_candidates_list(limit)
+                with self.lock:
+                    # 确保浏览器会话正常
+                    self._ensure_browser_session()
+                    
+                    if not self.is_logged_in:
+                        raise Exception("未登录")
+                
+                candidates = get_candidates_list_action(
+                    self.page, 
+                    limit, 
+                    logger=self.add_notification,
+                    black_companies=getattr(self, 'black_companies', None),
+                    save_candidates_func=self.save_candidates_to_file
+                )
                 return JSONResponse({
                     'success': True,
                     'candidates': candidates,
@@ -171,15 +196,51 @@ class BossService:
                     'error': str(e),
                     'timestamp': datetime.now().isoformat()
                 })
-        
+
+        @self.app.get('/candidates/recommended')
+        def get_recommended_candidates(limit: int = Query(20, ge=1, le=100)):
+            with self.lock:
+                """获取推荐候选人列表"""
+                self._ensure_browser_session()
+                try:
+                    result = list_recommended_candidates_action(self.page, limit=limit)
+                except Exception as e:
+                    self.add_notification(f"获取推荐候选人失败: {e}", "error")
+                    raise
+
+                candidates = result.get('candidates', []) or []
+                if result.get('success'):
+                    self.add_notification(f"成功获取 {len(candidates)} 个推荐候选人", "success")
+                else:
+                    self.add_notification(result.get('details', '未找到推荐候选人'), "warning")
+
+                candidates = result.get('candidates', [])
+                return JSONResponse({
+                    'success': result.get('success', False),
+                    'candidates': candidates,
+                    'count': len(candidates),
+                    'details': result.get('details', ''),
+                    'timestamp': datetime.now().isoformat()
+                })
+
         @self.app.get('/messages')
         def get_messages(limit: int = Query(10, ge=1, le=100)):
             try:
-                # Explicitly ensure login before getting messages
-                if not self.ensure_login():
-                    return JSONResponse(status_code=401, content={"error": "Not logged in"})
+                with self.lock:
+                    # 确保浏览器会话正常
+                    self._ensure_browser_session()
+                    
+                    # 复用统一的登录逻辑
+                    if not self.is_logged_in:
+                        if not self.ensure_login():
+                            return JSONResponse(status_code=401, content={"error": "Not logged in"})
 
-                messages = self.get_messages_list(limit)
+                messages = get_messages_list_action(
+                    self.page, 
+                    limit, 
+                    logger=self.add_notification,
+                    chat_cache=self.event_manager.chat_cache
+                )
                 return JSONResponse({
                     'success': True,
                     'messages': messages,
@@ -260,7 +321,12 @@ class BossService:
         @self.app.post('/resume/request')
         def request_resume_api(chat_id: str = Body(..., embed=True)):
             try:
-                result = self.request_resume(chat_id)
+                # 确保浏览器会话和登录
+                self._ensure_browser_session()
+                if not self.is_logged_in and not self.ensure_login():
+                    raise Exception("未登录")
+
+                result = request_resume_action(self.page, chat_id, logger=self.add_notification)
                 return JSONResponse({
                     'success': result.get('success', False),
                     'chat_id': chat_id,
@@ -279,7 +345,12 @@ class BossService:
         def send_message_api(chat_id: str = Body(..., embed=True), message: str = Body(..., embed=True)):
             """发送文本消息到指定对话"""
             try:
-                result = self.send_message(chat_id, message)
+                # 确保浏览器会话和登录
+                self._ensure_browser_session()
+                if not self.is_logged_in and not self.ensure_login():
+                    raise Exception("未登录")
+
+                result = send_message_action(self.page, chat_id, message, logger=self.add_notification)
                 return JSONResponse({
                     'success': result.get('success', False),
                     'chat_id': chat_id,
@@ -298,7 +369,12 @@ class BossService:
         def get_message_history(chat_id: str = Query(...)):
             """获取指定会话的聊天历史（右侧面板）"""
             try:
-                history = self.get_chat_history(chat_id)
+                # 确保会话
+                self._ensure_browser_session()
+                if not self.is_logged_in and not self.ensure_login():
+                    raise Exception("未登录")
+
+                history = get_chat_history_action(self.page, chat_id, logger=self.add_notification)
                 return JSONResponse({
                     'success': True,
                     'chat_id': chat_id,
@@ -317,8 +393,36 @@ class BossService:
         def view_resume_api(chat_id: str = Body(..., embed=True)):
             """点击查看候选人的附件简历"""
             try:
-                result = self.view_resume(chat_id)
+                # 确保浏览器会话和登录
+                self._ensure_browser_session()
+                if not self.is_logged_in and not self.ensure_login():
+                    raise Exception("未登录")
+
+                result = view_resume_action(self.page, chat_id, logger=self.add_notification)
                 return result
+            except Exception as e:
+                return JSONResponse({
+                    'success': False,
+                    'error': str(e),
+                    'timestamp': datetime.now().isoformat()
+                })
+
+        @self.app.post('/candidate/discard')
+        def discard_candidate_api(chat_id: str = Body(..., embed=True)):
+            """丢弃候选人 - 点击"不合适"按钮"""
+            try:
+                # 确保浏览器会话和登录
+                self._ensure_browser_session()
+                if not self.is_logged_in and not self.ensure_login():
+                    raise Exception("未登录")
+
+                result = discard_candidate_action(self.page, chat_id, logger=self.add_notification)
+                return JSONResponse({
+                    'success': result.get('success', False),
+                    'chat_id': chat_id,
+                    'details': result.get('details', ''),
+                    'timestamp': datetime.now().isoformat()
+                })
             except Exception as e:
                 return JSONResponse({
                     'success': False,
@@ -333,7 +437,12 @@ class BossService:
             Args:
                 chat_id: 聊天ID
             """
-            result = self.view_online_resume(chat_id)
+            # 会话与登录
+            # self._ensure_browser_session()
+            # if not self.is_logged_in and not self.ensure_login():
+            #     raise Exception("未登录")
+
+            result = view_online_resume_action(self.page, chat_id, logger=self.add_notification)
             return JSONResponse({
                 'success': result.get('success', False),
                 'chat_id': chat_id,
@@ -536,9 +645,9 @@ class BossService:
                 self.add_notification(f"事件管理器设置失败: {e}", "error")
 
             # 导航到聊天页面
-            self.add_notification("导航到聊天页面...", "info")
             try:
-                if settings.CHAT_URL not in getattr(self.page, 'url', ''):
+                if settings.BASE_URL not in getattr(self.page, 'url', ''):
+                    self.add_notification("导航到聊天页面...", "info")
                     self.page.goto(settings.CHAT_URL, wait_until="domcontentloaded", timeout=3000)
                 else:
                     self.add_notification("已导航到聊天页面", "info")
@@ -668,10 +777,6 @@ class BossService:
                 except Exception:
                     pass
             
-            # If blank, or not on the chat page, navigate and wait for login.
-            self.add_notification("导航到聊天页面...", "info")
-            self.page.goto(settings.CHAT_URL, wait_until="domcontentloaded", timeout=30000)
-            
             # Wait for page to load and check if we were redirected to login page
             try:
                 self.page.wait_for_load_state("networkidle", timeout=5000)
@@ -744,160 +849,6 @@ class BossService:
             self.add_notification(traceback.format_exc(), "error")
             return False
     
-    def get_candidates_list(self, limit=10):
-        """获取候选人列表"""
-        with self.lock:
-            # 确保浏览器会话正常
-            self._ensure_browser_session()
-            
-            if not self.is_logged_in:
-                raise Exception("未登录")
-            
-            self.add_notification(f"获取候选人列表 (限制: {limit})", "info")
-            
-        try:
-            # 等待加载提示消失
-            try:
-                self.page.wait_for_function(
-                    "() => !document.body.innerText.includes('加载中，请稍候')",
-                    timeout=30000
-                )
-            except Exception:
-                pass
-            
-            # DOM 提取
-            candidates = extract_candidates(self.page, limit=limit, add_notification=self.add_notification)
-        except Exception as e:
-            self.add_notification(f"获取候选人列表失败: {e}", "error")
-            raise
-        
-        # 黑名单过滤（如果存在）
-        if candidates and hasattr(self, 'black_companies'):
-            candidates = [c for c in candidates if not (c.get('company') and any(b in c.get('company') for b in self.black_companies))]
-
-        self.add_notification(f"成功获取 {len(candidates)} 个候选人", "success")
-        
-        # 保存候选人数据到文件
-        if candidates:
-            self.save_candidates_to_file(candidates)
-        
-        return candidates
-    
-    def save_candidates_to_file(self, candidates):
-        """保存候选人数据到文件"""
-        try:
-            # 使用现有的导出功能
-            json_path, csv_path = export_records(candidates, prefix="candidates")
-            self.add_notification(f"候选人数据已保存到: {json_path}", "success")
-            
-        except Exception as e:
-            self.add_notification(f"保存候选人数据失败: {e}", "error")
-    
-    def get_messages_list(self, limit: int = 10):
-        """获取消息列表"""
-        with self.lock:
-            # 确保浏览器会话正常
-            self._ensure_browser_session()
-            
-            # 复用统一的登录逻辑
-            if not self.is_logged_in:
-                if not self.ensure_login():
-                    raise Exception("未登录")
-            
-            self.add_notification(f"获取消息列表 (限制: {limit})", "info")
-            
-            try:
-                messages = extract_messages(self.page, limit=limit, chat_cache=self.event_manager.chat_cache.get_all())
-                if not messages:
-                    # 使用事件管理器获取缓存的消息
-                    messages = self.event_manager.get_cached_messages(limit)
-                if not messages:
-                    self.add_notification("消息列表为空（DOM+缓存均无）", "warning")
-                self.add_notification(f"成功获取 {len(messages)} 条消息", "success")
-                return messages
-
-            except Exception as e:
-                self.add_notification(f"获取消息列表失败: {e}", "error")
-                raise
-
-    def request_resume(self, chat_id: str) -> dict:
-        """对某个对话发送求简历请求。如果已存在“简历请求已发送”，则不重复发送。
-        返回: { success: bool, already_sent: bool, details: str }
-        """
-
-        # 确保浏览器会话和登录
-        self._ensure_browser_session()
-        if not self.is_logged_in and not self.ensure_login():
-            raise Exception("未登录")
-
-        try:
-            return request_resume_action(self.page, chat_id)
-        except Exception as e:
-            self.add_notification(f"求简历操作失败: {e}", "error")
-            raise
-
-    def get_chat_history(self, chat_id: str) -> list[dict]:
-        """读取右侧聊天历史，返回结构化消息列表。
-        依赖 DOM 结构：
-        - 容器：div.conversation-message
-        - 列表：div.chat-message-list
-        - 每条：div.message-item
-        - 时间：.message-time .time
-        - 文本：.item-friend .text span 或系统卡片 .item-system
-        """
-        # 确保会话
-        self._ensure_browser_session()
-        if not self.is_logged_in and not self.ensure_login():
-            raise Exception("未登录")
-
-        history = extract_chat_history(self.page, chat_id)
-        return history
-
-    def send_message(self, chat_id: str, message: str) -> dict:
-        """发送文本消息到指定对话。
-        返回: { success: bool, details: str }
-        """
-        # 确保浏览器会话和登录
-        self._ensure_browser_session()
-        if not self.is_logged_in and not self.ensure_login():
-            raise Exception("未登录")
-
-        try:
-            return send_message_action(self.page, chat_id, message)
-        except Exception as e:
-            self.add_notification(f"发送消息失败: {e}", "error")
-            raise
-
-    def view_resume(self, chat_id: str) -> dict:
-        """点击查看候选人的附件简历。
-        返回: { success: bool, details: str }
-        """
-        # 确保浏览器会话和登录
-        self._ensure_browser_session()
-        if not self.is_logged_in and not self.ensure_login():
-            raise Exception("未登录")
-
-        try:
-            resume_result = view_resume_action(self.page, chat_id)
-            return resume_result
-        except Exception as e:
-            self.add_notification(f"查看简历失败: {e}", "error")
-            raise
-
-    def view_online_resume(self, chat_id: str) -> dict:
-        """点击会话 -> 点击"在线简历" -> 使用多级回退链条输出文本或图像。"""
-        # 会话与登录
-        # self._ensure_browser_session()
-        # if not self.is_logged_in and not self.ensure_login():
-        #     raise Exception("未登录")
-
-        result = capture_resume_from_chat(self.page, chat_id, logger=self.logger)
-        # 统一加上success存在性
-        if not isinstance(result, dict):
-            return { 'success': False, 'details': '未知错误: 结果类型异常' }
-        if 'success' not in result:
-            result['success'] = bool(result.get('text') or result.get('image_base64') or result.get('data_url'))
-        return result
     
     def _graceful_shutdown(self):
         """Gracefully shut down Playwright resources."""
@@ -1000,7 +951,13 @@ class BossService:
                     pass
                 
                 # 查找指定候选人的对话项
-                candidates = self.get_candidates_list(limit=50)  # 获取更多候选人
+                candidates = get_candidates_list_action(
+                    self.page, 
+                    limit=50, 
+                    logger=self.add_notification,
+                    black_companies=getattr(self, 'black_companies', None),
+                    save_candidates_func=self.save_candidates_to_file
+                )  # 获取更多候选人
                 target_candidate = None
                 
                 for candidate in candidates:
