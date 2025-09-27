@@ -5,8 +5,8 @@ from typing import Any, Dict, List, Optional
 from playwright.sync_api import Locator
 from .resume_capture import extract_pdf_viewer_text, capture_resume_from_chat
 from .extractors import extract_candidates, extract_messages, extract_chat_history
-
-
+from src.config import settings
+from .chat_utils import close_overlay_dialogs
 CHAT_ITEM_SELECTORS = ("div.geek-item", "[role='listitem']")
 CONVERSATION_SELECTOR = "div.conversation-message"
 MESSAGE_INPUT_SELECTOR = "#boss-chat-editor-input"
@@ -16,15 +16,19 @@ PDF_VIEWER_SELECTOR = "div.pdfViewer"
 
 
 
-def _prepare_chat_page(page, chat_id: str, *, wait_timeout: int = 5000) -> tuple[Optional[Locator], Optional[Dict[str, Any]]]:
+def _prepare_chat_page(page, chat_id: str = None, *, wait_timeout: int = 5000) -> tuple[Optional[Locator], Optional[Dict[str, Any]]]:
     # Ensure we are on the chat page; if not, click the chat menu
     # If current URL is not the chat page, click the chat menu to navigate
-    if not page.url.startswith("https://www.zhipin.com/web/chat"):
+    close_overlay_dialogs(page)
+    if not settings.CHAT_URL in page.url:
         menu_chat = page.locator("dl.menu-chat").first
         menu_chat.click()
         # Wait for chat list to appear
         page.wait_for_selector("div.geek-item, [role='listitem']", timeout=wait_timeout)
     """Ensure the chat is focused and the conversation panel is ready."""
+
+    if not chat_id:
+        return None, None
     direct_selectors = [
         f"div.geek-item[data-id=\"{chat_id}\"]",
         f"div[role='listitem'][key=\"{chat_id}\"]",
@@ -136,7 +140,7 @@ def send_message_action(page, chat_id: str, message: str, *, logger=lambda msg, 
     return { 'success': False, 'details': '消息可能未发送成功，输入框仍有内容' }
 
 
-def view_full_resume_action(page, chat_id: str) -> Dict[str, Any]:
+def view_full_resume_action(page, chat_id: str, *, logger=lambda msg, level: None) -> Dict[str, Any]:
     """点击查看候选人的附件简历"""
 
     _, error = _prepare_chat_page(page, chat_id, wait_timeout=5000)
@@ -223,16 +227,7 @@ def discard_candidate_action(page, chat_id: str, *, logger=lambda msg, level: No
 def get_candidates_list_action(page, limit: int = 10, *, logger=lambda msg, level: None, black_companies=None, save_candidates_func=None):
     """获取候选人列表"""
     logger(f"获取候选人列表 (限制: {limit})", "info")
-    
-    # 等待加载提示消失
-    try:
-        page.wait_for_function(
-            "() => !document.body.innerText.includes('加载中，请稍候')",
-            timeout=30000
-        )
-    except Exception:
-        pass
-    
+    _prepare_chat_page(page)
     # DOM 提取
     candidates = extract_candidates(page, limit=limit, logger=logger)
     
@@ -252,7 +247,7 @@ def get_candidates_list_action(page, limit: int = 10, *, logger=lambda msg, leve
 def get_messages_list_action(page, limit: int = 10, *, logger=lambda msg, level: None, chat_cache=None):
     """获取消息列表"""
     logger(f"获取消息列表 (限制: {limit})", "info")
-    
+    _prepare_chat_page(page)
     messages = extract_messages(page, limit=limit, chat_cache=chat_cache.get_all() if chat_cache else None)
     if not messages and chat_cache:
         # 使用事件管理器获取缓存的消息
@@ -282,6 +277,7 @@ def view_online_resume_action(page, chat_id: str, *, logger=lambda msg, level: N
         return error
 
     result = capture_resume_from_chat(page, chat_id, logger=logger)
+    close_overlay_dialogs(page, logger)
     # 统一加上success存在性
     if not isinstance(result, dict):
         return { 'success': False, 'details': '未知错误: 结果类型异常' }
