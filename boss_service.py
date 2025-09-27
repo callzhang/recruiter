@@ -37,6 +37,7 @@ from src.chat_actions import (
 )
 from src.recommendation_actions import (
     list_recommended_candidates_action,
+    view_candidate_resume_action,
 )
 from src import page_selectors as sel
 from src.blacklist import load_blacklist, NEGATIVE_HINTS
@@ -152,58 +153,40 @@ class BossService:
         
         @self.app.post('/login')
         def login():
-            try:
-                self._ensure_browser_session()
-                return JSONResponse({
-                    'success': self.is_logged_in,
-                    'message': '登录成功' if self.is_logged_in else '登录失败',
-                    'timestamp': datetime.now().isoformat()
-                })
-            except Exception as e:
-                return JSONResponse({
-                    'success': False,
-                    'error': str(e),
-                    'timestamp': datetime.now().isoformat()
-                })
+            self._ensure_browser_session()
+            return JSONResponse({
+                'success': self.is_logged_in,
+                'message': '登录成功' if self.is_logged_in else '登录失败',
+                'timestamp': datetime.now().isoformat()
+            })
         
         @self.app.get('/chat/candidates')
         def get_candidates(limit: int = Query(10, ge=1, le=100)):
-            try:
-                # 确保浏览器会话正常
-                self._ensure_browser_session()
-                
-                if not self.is_logged_in:
-                    raise Exception("未登录")
-                
-                candidates = get_candidates_list_action(
-                    self.page, 
-                    limit, 
-                    logger=self.add_notification,
-                    black_companies=getattr(self, 'black_companies', None),
-                    save_candidates_func=self.save_candidates_to_file
-                )
-                return JSONResponse({
-                    'success': True,
-                    'candidates': candidates,
-                    'count': len(candidates),
-                    'timestamp': datetime.now().isoformat()
-                })
-            except Exception as e:
-                return JSONResponse({
-                    'success': False,
-                    'error': str(e),
-                    'timestamp': datetime.now().isoformat()
-                })
+            # 确保浏览器会话正常
+            self._ensure_browser_session()
+            
+            if not self.is_logged_in:
+                raise Exception("未登录")
+            
+            candidates = get_candidates_list_action(
+                self.page, 
+                limit, 
+                logger=self.add_notification,
+                black_companies=getattr(self, 'black_companies', None),
+                save_candidates_func=self.save_candidates_to_file
+            )
+            return JSONResponse({
+                'success': True,
+                'candidates': candidates,
+                'count': len(candidates),
+                'timestamp': datetime.now().isoformat()
+            })
 
         @self.app.get('/recommend/candidates')
         def get_recommended_candidates(limit: int = Query(20, ge=1, le=100)):
             """获取推荐候选人列表"""
             self._ensure_browser_session()
-            try:
-                result = list_recommended_candidates_action(self.page, limit=limit)
-            except Exception as e:
-                self.add_notification(f"获取推荐候选人失败: {e}", "error")
-                raise
+            result = list_recommended_candidates_action(self.page, limit=limit)
 
             candidates = result.get('candidates', [])
             return JSONResponse({
@@ -214,30 +197,30 @@ class BossService:
                 'timestamp': datetime.now().isoformat()
             })
 
+        @self.app.get('/recommend/candidate/{index}')
+        def view_recommended_candidate_resume(index: int):
+            self._ensure_browser_session()
+            result = view_candidate_resume_action(self.page, index)
+            return JSONResponse(result)
+            
+
         @self.app.get('/chat/dialogs')
         def get_messages(limit: int = Query(10, ge=1, le=100)):
-            try:
-                # 确保浏览器会话正常
-                self._ensure_browser_session()
+            # 确保浏览器会话正常
+            self._ensure_browser_session()
 
-                messages = get_messages_list_action(
-                    self.page, 
-                    limit, 
-                    logger=self.add_notification,
-                    chat_cache=self.event_manager.chat_cache
-                )
-                return JSONResponse({
-                    'success': True,
-                    'messages': messages,
-                    'count': len(messages),
-                    'timestamp': datetime.now().isoformat()
-                })
-            except Exception as e:
-                return JSONResponse({
-                    'success': False,
-                    'error': str(e),
-                    'timestamp': datetime.now().isoformat()
-                })
+            messages = get_messages_list_action(
+                self.page, 
+                limit, 
+                logger=self.add_notification,
+                chat_cache=self.event_manager.chat_cache
+            )
+            return JSONResponse({
+                'success': True,
+                'messages': messages,
+                'count': len(messages),
+                'timestamp': datetime.now().isoformat()
+            })
 
         @self.app.get('/search')
         def search_preview(
@@ -248,147 +231,98 @@ class BossService:
             degree: str = Query('不限'),
             industry: str = Query('不限')
         ):
-            try:
-                # 将人类可读配置映射为站点参数
-                params = {
-                    'city': mapx.map_value(city, mapx.CITY_CODE),
-                    'jobType': mapx.map_value(job_type, mapx.JOB_TYPE),
-                    'salary': mapx.map_value(salary, mapx.SALARY),
-                    'experience': mapx.map_value(experience, mapx.EXPERIENCE),
-                    'degree': mapx.map_value(degree, mapx.DEGREE),
-                    'industry': mapx.map_value(industry, mapx.INDUSTRY),
-                }
-                # 仅返回参数与构造示例，实际搜索页URL以站点逻辑为准
-                preview = {
-                    'base': settings.BASE_URL.rstrip('/') + '/web/geek/job?',
-                    'params': params,
-                }
-                return JSONResponse({'success': True, 'preview': preview, 'timestamp': datetime.now().isoformat()})
-            except Exception as e:
-                return JSONResponse({
-                    'success': False,
-                    'error': str(e),
-                    'timestamp': datetime.now().isoformat()
-                })
+            # 将人类可读配置映射为站点参数
+            params = {
+                'city': mapx.map_value(city, mapx.CITY_CODE),
+                'jobType': mapx.map_value(job_type, mapx.JOB_TYPE),
+                'salary': mapx.map_value(salary, mapx.SALARY),
+                'experience': mapx.map_value(experience, mapx.EXPERIENCE),
+                'degree': mapx.map_value(degree, mapx.DEGREE),
+                'industry': mapx.map_value(industry, mapx.INDUSTRY),
+            }
+            # 仅返回参数与构造示例，实际搜索页URL以站点逻辑为准
+            preview = {
+                'base': settings.BASE_URL.rstrip('/') + '/web/geek/job?',
+                'params': params,
+            }
+            return JSONResponse({'success': True, 'preview': preview, 'timestamp': datetime.now().isoformat()})
         
         @self.app.post('/chat/{chat_id}/greet')
         def greet_candidate(chat_id: str, message: str | None = None):
-            try:
-                result = self.send_greeting(chat_id, message or '您好，我对您的简历很感兴趣，希望能进一步沟通。')
-                return JSONResponse({
-                    'success': result,
-                    'message': '打招呼成功' if result else '打招呼失败',
-                    'timestamp': datetime.now().isoformat()
-                })
-            except Exception as e:
-                return JSONResponse({
-                    'success': False,
-                    'error': str(e),
-                    'timestamp': datetime.now().isoformat()
-                })
+            result = self.send_greeting(chat_id, message or '您好，我对您的简历很感兴趣，希望能进一步沟通。')
+            return JSONResponse({
+                'success': result,
+                'message': '打招呼成功' if result else '打招呼失败',
+                'timestamp': datetime.now().isoformat()
+            })
         
 
         @self.app.post('/resume/request')
         def request_resume_api(chat_id: str = Body(..., embed=True)):
-            try:
-                # 确保浏览器会话和登录
-                self._ensure_browser_session()
+            # 确保浏览器会话和登录
+            self._ensure_browser_session()
 
-                result = request_resume_action(self.page, chat_id, logger=self.add_notification)
-                return JSONResponse({
-                    'success': result.get('success', False),
-                    'chat_id': chat_id,
-                    'already_sent': result.get('already_sent', False),
-                    'details': result.get('details', ''),
-                    'timestamp': datetime.now().isoformat()
-                })
-            except Exception as e:
-                return JSONResponse({
-                    'success': False,
-                    'error': str(e),
-                    'timestamp': datetime.now().isoformat()
-                })
+            result = request_resume_action(self.page, chat_id, logger=self.add_notification)
+            return JSONResponse({
+                'success': result.get('success', False),
+                'chat_id': chat_id,
+                'already_sent': result.get('already_sent', False),
+                'details': result.get('details', ''),
+                'timestamp': datetime.now().isoformat()
+            })
 
         @self.app.post('/chat/{chat_id}/send')
         def send_message_api(chat_id: str, message: str = Body(..., embed=True)):
             """发送文本消息到指定对话"""
-            try:
-                # 确保浏览器会话和登录
-                self._ensure_browser_session()
+            # 确保浏览器会话和登录
+            self._ensure_browser_session()
 
-                result = send_message_action(self.page, chat_id, message, logger=self.add_notification)
-                return JSONResponse({
-                    'success': result.get('success', False),
-                    'chat_id': chat_id,
-                    'message': message,
-                    'details': result.get('details', ''),
-                    'timestamp': datetime.now().isoformat()
-                })
-            except Exception as e:
-                return JSONResponse({
-                    'success': False,
-                    'error': str(e),
-                    'timestamp': datetime.now().isoformat()
-                })
+            result = send_message_action(self.page, chat_id, message, logger=self.add_notification)
+            return JSONResponse({
+                'success': result.get('success', False),
+                'chat_id': chat_id,
+                'message': message,
+                'details': result.get('details', ''),
+                'timestamp': datetime.now().isoformat()
+            })
 
         @self.app.get('/chat/{chat_id}/messages')
         def get_message_history(chat_id: str):
             """获取指定会话的聊天历史（右侧面板）"""
-            try:
-                # 确保会话
-                self._ensure_browser_session()
+            # 确保会话
+            self._ensure_browser_session()
 
-                history = get_chat_history_action(self.page, chat_id, logger=self.add_notification)
-                return JSONResponse({
-                    'success': True,
-                    'chat_id': chat_id,
-                    'messages': history,
-                    'count': len(history),
-                    'timestamp': datetime.now().isoformat()
-                })
-            except Exception as e:
-                return JSONResponse({
-                    'success': False,
-                    'error': str(e),
-                    'timestamp': datetime.now().isoformat()
-                })
+            history = get_chat_history_action(self.page, chat_id, logger=self.add_notification)
+            return JSONResponse({
+                'success': True,
+                'chat_id': chat_id,
+                'messages': history,
+                'count': len(history),
+                'timestamp': datetime.now().isoformat()
+            })
 
         @self.app.post('/resume/view')
         def view_resume_api(chat_id: str = Body(..., embed=True)):
             """点击查看候选人的附件简历"""
-            try:
-                # 确保浏览器会话和登录
-                self._ensure_browser_session()
+            # 确保浏览器会话和登录
+            self._ensure_browser_session()
 
-                result = view_full_resume_action(self.page, chat_id, logger=self.add_notification)
-                return result
-            except Exception as e:
-                return JSONResponse({
-                    'success': False,
-                    'error': str(e),
-                    'timestamp': datetime.now().isoformat()
-                })
+            result = view_full_resume_action(self.page, chat_id, logger=self.add_notification)
+            return result
 
         @self.app.post('/candidate/discard')
         def discard_candidate_api(chat_id: str = Body(..., embed=True)):
             """丢弃候选人 - 点击"不合适"按钮"""
-            try:
-                # 确保浏览器会话和登录
-                self._ensure_browser_session()
+            # 确保浏览器会话和登录
+            self._ensure_browser_session()
 
-                result = discard_candidate_action(self.page, chat_id, logger=self.add_notification)
-                return JSONResponse({
-                    'success': result.get('success', False),
-                    'chat_id': chat_id,
-                    'details': result.get('details', ''),
-                    'timestamp': datetime.now().isoformat()
-                })
-            except Exception as e:
-                return JSONResponse({
-                    'success': False,
-                    'error': str(e),
-                    'timestamp': datetime.now().isoformat()
-                })
+            result = discard_candidate_action(self.page, chat_id, logger=self.add_notification)
+            return JSONResponse({
+                'success': result.get('success', False),
+                'chat_id': chat_id,
+                'details': result.get('details', ''),
+                'timestamp': datetime.now().isoformat()
+            })
 
         @self.app.post('/resume/online')
         def view_online_resume_api(chat_id: str = Body(..., embed=True)):
@@ -420,134 +354,76 @@ class BossService:
         @self.app.post('/resume/accept')
         def accept_resume_api(chat_id: str = Body(..., embed=True)):
             """接受候选人 - 点击"接受"按钮"""
-            try:
-                # 确保浏览器会话和登录
-                self._ensure_browser_session()
-                
-                result = accept_resume_action(self.page, chat_id, logger=self.add_notification)
-                return JSONResponse({
-                    'success': result.get('success', False),
-                    'chat_id': chat_id,
-                    'details': result.get('details', ''),
-                    'timestamp': datetime.now().isoformat()
-                })
-            except Exception as e:
-                return JSONResponse({
-                    'success': False,
-                    'error': str(e),
-                    'timestamp': datetime.now().isoformat()
-                })
+            # 确保浏览器会话和登录
+            self._ensure_browser_session()
+            
+            result = accept_resume_action(self.page, chat_id, logger=self.add_notification)
+            return JSONResponse({
+                'success': result.get('success', False),
+                'chat_id': chat_id,
+                'details': result.get('details', ''),
+                'timestamp': datetime.now().isoformat()
+            })
 
         
         @self.app.post('/restart')
         def soft_restart():
             """软重启API服务，保持浏览器会话"""
-            try:
-                self.soft_restart()
-                return JSONResponse({
-                    'success': True,
-                    'message': 'API服务已重启，浏览器会话保持',
-                    'timestamp': datetime.now().isoformat()
-                })
-            except Exception as e:
-                return JSONResponse({
-                    'success': False,
-                    'error': str(e),
-                    'timestamp': datetime.now().isoformat()
-                })
+            self.soft_restart()
+            return JSONResponse({
+                'success': True,
+                'message': 'API服务已重启，浏览器会话保持',
+                'timestamp': datetime.now().isoformat()
+            })
         
         @self.app.get('/debug/page')
         def debug_page():
             """调试接口 - 获取当前页面内容"""
-            try:
-                # 确保浏览器会话正常
-                self._ensure_browser_session()
-                
-                # 等待页面完全渲染（事件驱动）
-                try:
-                    self.page.locator("body").wait_for(state="visible", timeout=5000)
-                    self.page.wait_for_load_state("networkidle", timeout=5000)
-                except Exception:
-                    pass
-                
-                if not self.page or self.page.is_closed():
-                    return JSONResponse({
-                        'success': False,
-                        'error': '页面未打开或已关闭',
-                        'timestamp': datetime.now().isoformat()
-                    })
-                
-                # 获取页面信息
-                full_content = self.page.content()
-                # 截取前5000个字符，避免返回过长的HTML
-                readable_content = full_content[:5000] + "..." if len(full_content) > 5000 else full_content
-                
-                page_info = {
-                    'url': self.page.url,
-                    'title': self.page.title(),
-                    'content': readable_content,
-                    'content_length': len(full_content),
-                    'screenshot': None,
-                    'cookies': [],
-                    'local_storage': {},
-                    'session_storage': {}
-                }
-                
-                # 尝试获取截图
-                # try:
-                #     screenshot = self.page.screenshot()
-                #     import base64
-                #     page_info['screenshot'] = base64.b64encode(screenshot).decode('utf-8')
-                # except Exception as e:
-                #     page_info['screenshot_error'] = str(e)
-                
-                # 获取cookies
-                # try:
-                #     page_info['cookies'] = self.page.context.cookies()
-                # except Exception as e:
-                #     page_info['cookies_error'] = str(e)
-                
-                # # 获取local storage
-                # try:
-                #     page_info['local_storage'] = self.page.evaluate("() => { return {...localStorage}; }")
-                # except Exception as e:
-                #     page_info['local_storage_error'] = str(e)
-                
-                # # 获取session storage
-                # try:
-                #     page_info['session_storage'] = self.page.evaluate("() => { return {...sessionStorage}; }")
-                # except Exception as e:
-                #     page_info['session_storage_error'] = str(e)
-                
-                return JSONResponse({
-                    'success': True,
-                    'page_info': page_info,
-                    'timestamp': datetime.now().isoformat()
-                })
-                
-            except Exception as e:
+            # 确保浏览器会话正常
+            self._ensure_browser_session()
+            
+            # 等待页面完全渲染（事件驱动）
+            self.page.locator("body").wait_for(state="visible", timeout=5000)
+            self.page.wait_for_load_state("networkidle", timeout=5000)
+            
+            if not self.page or self.page.is_closed():
                 return JSONResponse({
                     'success': False,
-                    'error': str(e),
+                    'error': '页面未打开或已关闭',
                     'timestamp': datetime.now().isoformat()
                 })
+            
+            # 获取页面信息
+            full_content = self.page.content()
+            # 截取前5000个字符，避免返回过长的HTML
+            readable_content = full_content[:5000] + "..." if len(full_content) > 5000 else full_content
+            
+            page_info = {
+                'url': self.page.url,
+                'title': self.page.title(),
+                'content': readable_content,
+                'content_length': len(full_content),
+                'screenshot': None,
+                'cookies': [],
+                'local_storage': {},
+                'session_storage': {}
+            }
+            
+            return JSONResponse({
+                'success': True,
+                'page_info': page_info,
+                'timestamp': datetime.now().isoformat()
+            })
         
         @self.app.get('/debug/cache')
         def get_cache_stats():
             """获取事件缓存统计信息"""
-            try:
-                stats = self.event_manager.get_cache_stats()
-                return JSONResponse({
-                    'success': True,
-                    'cache_stats': stats,
-                    'timestamp': datetime.now().isoformat()
-                })
-            except Exception as e:
-                return JSONResponse({
-                    'success': False,
-                    'error': str(e),
-                    'timestamp': datetime.now().isoformat()
-                })
+            stats = self.event_manager.get_cache_stats()
+            return JSONResponse({
+                'success': True,
+                'cache_stats': stats,
+                'timestamp': datetime.now().isoformat()
+            })
     
     def _resolve_storage_state_path(self):
         """优先从环境变量注入登录态。
@@ -555,18 +431,15 @@ class BossService:
         - BOSS_STORAGE_STATE_FILE: 指定storage_state文件路径
         - 否则: 使用settings.STORAGE_STATE
         """
-        try:
-            env_json = os.environ.get("BOSS_STORAGE_STATE_JSON")
-            if env_json:
-                os.makedirs(os.path.dirname(settings.STORAGE_STATE), exist_ok=True)
-                # 验证JSON
-                _ = json.loads(env_json)
-                with open(settings.STORAGE_STATE, "w", encoding="utf-8") as f:
-                    f.write(env_json)
-                self.add_notification("已从环境变量写入登录状态(JSON)", "success")
-                return settings.STORAGE_STATE
-        except Exception as e:
-            self.add_notification(f"写入环境JSON登录状态失败: {e}", "warning")
+        env_json = os.environ.get("BOSS_STORAGE_STATE_JSON")
+        if env_json:
+            os.makedirs(os.path.dirname(settings.STORAGE_STATE), exist_ok=True)
+            # 验证JSON
+            _ = json.loads(env_json)
+            with open(settings.STORAGE_STATE, "w", encoding="utf-8") as f:
+                f.write(env_json)
+            self.add_notification("已从环境变量写入登录状态(JSON)", "success")
+            return settings.STORAGE_STATE
         
         env_path = os.environ.get("BOSS_STORAGE_STATE_FILE")
         if env_path and os.path.exists(env_path):
@@ -586,143 +459,102 @@ class BossService:
         user_data_dir = self._get_user_data_dir()
         self.add_notification(f"使用用户数据目录: {user_data_dir}", "info")
 
-        try:
-            # 确保 playwright 已启动
-            if not getattr(self, 'playwright', None):
-                self.add_notification("Playwright尚未初始化，正在启动...", "info")
-                self.playwright = sync_playwright().start()
+        # 确保 playwright 已启动
+        if not getattr(self, 'playwright', None):
+            self.add_notification("Playwright尚未初始化，正在启动...", "info")
+            self.playwright = sync_playwright().start()
 
-            # 仅通过 CDP 连接外部持久化浏览器，失败则直接中止（不再本地回退）
-            browser = None
-            try:
-                self.add_notification(f"尝试通过CDP连接浏览器: {settings.CDP_URL}", "info")
-                browser = self.playwright.chromium.connect_over_cdp(settings.CDP_URL)
-                self.context = browser.contexts[0] if browser.contexts else browser.new_context()
-            except Exception as e:
-                self.add_notification(f"CDP连接失败，终止启动: {e}", "error")
-                raise
+        # 仅通过 CDP 连接外部持久化浏览器，失败则直接中止（不再本地回退）
+        self.add_notification(f"尝试通过CDP连接浏览器: {settings.CDP_URL}", "info")
+        browser = self.playwright.chromium.connect_over_cdp(settings.CDP_URL)
+        self.context = browser.contexts[0] if browser.contexts else browser.new_context()
 
-            # （可选）本地存储态仅适用于本地持久化；CDP模式下依靠浏览器自身profile
+        # （可选）本地存储态仅适用于本地持久化；CDP模式下依靠浏览器自身profile
 
-            
-            # 复用持久化上下文的初始页：若存在则使用第一个页面，否则新建
-            try:
-                pages = list(self.context.pages)
-                if pages:
-                    self.page = pages[0]
-                else:
-                    self.page = self.context.new_page()
-            except Exception:
-                self.page = self.context.new_page()
+        
+        # 复用持久化上下文的初始页：若存在则使用第一个页面，否则新建
+        pages = list(self.context.pages)
+        if pages:
+            self.page = pages[0]
+        else:
+            self.page = self.context.new_page()
 
-            # 设置事件管理器（事件驱动的消息列表获取）
-            try:
-                if self.context:
-                    self.event_manager.setup(self.context)
-                    self.add_notification("事件管理器设置成功", "success")
-            except Exception as e:
-                self.add_notification(f"事件管理器设置失败: {e}", "error")
+        # 设置事件管理器（事件驱动的消息列表获取）
+        if self.context:
+            self.event_manager.setup(self.context)
+            self.add_notification("事件管理器设置成功", "success")
 
-            # 导航到聊天页面
-            try:
-                if settings.BASE_URL not in getattr(self.page, 'url', ''):
-                    self.add_notification("导航到聊天页面...", "info")
-                    self.page.goto(settings.CHAT_URL, wait_until="domcontentloaded", timeout=3000)
-                else:
-                    self.add_notification("已导航到聊天页面", "info")
-            except Exception:
-                # 忽略短暂错误，后续请求会再次校验
-                pass
+        # 导航到聊天页面
+        if settings.BASE_URL not in getattr(self.page, 'url', ''):
+            self.add_notification("导航到聊天页面...", "info")
+            self.page.goto(settings.CHAT_URL, wait_until="domcontentloaded", timeout=3000)
+        else:
+            self.add_notification("已导航到聊天页面", "info")
 
-
-            self.add_notification("持久化浏览器会话启动成功！", "success")
-            
-            # 文件监控已禁用（使用 uvicorn --reload）
-
-        except Exception as e:
-            self.add_notification(f"启动持久化浏览器失败: {e}", "error")
-            import traceback
-            self.add_notification(traceback.format_exc(), "error")
-            # Do not raise here, allow startup to complete so logs can be seen
+        self.add_notification("持久化浏览器会话启动成功！", "success")
+        
+        # 文件监控已禁用（使用 uvicorn --reload）
             
     def _load_saved_login_state(self):
         """尝试加载已保存的登录状态"""
-        try:
-            if os.path.exists(settings.STORAGE_STATE):
-                # 检查保存的登录状态文件
-                with open(settings.STORAGE_STATE, 'r') as f:
-                    storage_state = json.load(f)
-                
-                # 如果有cookies，说明可能已经登录过
-                if storage_state.get('cookies'):
-                    self.add_notification("发现已保存的登录状态", "info")
-                    # 注意：这里不直接设置 is_logged_in = True，因为需要验证
-                    # 实际的登录状态会在 ensure_login 中验证
-        except Exception as e:
-            self.add_notification(f"加载保存的登录状态失败: {e}", "warning")
+        if os.path.exists(settings.STORAGE_STATE):
+            # 检查保存的登录状态文件
+            with open(settings.STORAGE_STATE, 'r') as f:
+                storage_state = json.load(f)
+            
+            # 如果有cookies，说明可能已经登录过
+            if storage_state.get('cookies'):
+                self.add_notification("发现已保存的登录状态", "info")
+                # 注意：这里不直接设置 is_logged_in = True，因为需要验证
+                # 实际的登录状态会在 ensure_login 中验证
 
     def save_login_state(self):
         """保存登录状态"""
-        try:
-            # 确保目录存在
-            os.makedirs(os.path.dirname(settings.STORAGE_STATE), exist_ok=True)
-            
-            # 保存当前上下文状态
-            context = self.page.context
-            context.storage_state(path=settings.STORAGE_STATE)
-            
-            self.add_notification(f"登录状态已保存到: {settings.STORAGE_STATE}", "success")
-            
-            # 标记为已登录
-            self.is_logged_in = True
-            self.add_notification("用户登录状态已确认并保存", "success")
-            return True
-        except Exception as e:
-            self.add_notification(f"保存登录状态失败: {e}", "error")
-            return False
+        # 确保目录存在
+        os.makedirs(os.path.dirname(settings.STORAGE_STATE), exist_ok=True)
+        
+        # 保存当前上下文状态
+        context = self.page.context
+        context.storage_state(path=settings.STORAGE_STATE)
+        
+        self.add_notification(f"登录状态已保存到: {settings.STORAGE_STATE}", "success")
+        
+        # 标记为已登录
+        self.is_logged_in = True
+        self.add_notification("用户登录状态已确认并保存", "success")
+        return True
     
     def check_login_status(self):
         """检查登录状态"""
-        try:
-            # 访问聊天页面
-            self.page.goto(settings.BASE_URL.rstrip('/') + "/web/chat/index",
-                             wait_until="domcontentloaded", timeout=10000)
-            try:
-                self.page.wait_for_load_state("networkidle", timeout=5000)
-            except Exception:
-                pass
-                
-            page_text = self.page.locator("body").inner_text()
-            current_url = self.page.url
-            # 滑块验证检测与提示
-            if "/web/user/safe/verify-slider" in current_url:
-                self.add_notification("检测到滑块验证页面，请在浏览器中完成验证...", "warning")
-                # 等待验证通过或超时（最多5分钟）
-                start = time.time()
-                while time.time() - start < 300:
-                    try:
-                        self.page.wait_for_timeout(1000)
-                        current_url = self.page.url
-                        if "/web/user/safe/verify-slider" not in current_url:
-                            break
-                    except Exception:
-                        break
-                
-                # 检查是否在登录页面
-                if ("登录" in page_text and ("立即登录" in page_text or "登录/注册" in page_text)) or "login" in current_url.lower():
-                    self.add_notification("检测到需要登录", "warning")
-                    return False
-                
-                # 检查是否有聊天相关元素
-                if any(keyword in page_text for keyword in ["消息", "沟通", "聊天", "候选人", "简历"]):
-                    self.add_notification("登录状态正常", "success")
-                    return True
-                
-                self.add_notification("登录状态不明确", "warning")
+        # 访问聊天页面
+        self.page.goto(settings.BASE_URL.rstrip('/') + "/web/chat/index",
+                         wait_until="domcontentloaded", timeout=10000)
+        self.page.wait_for_load_state("networkidle", timeout=5000)
+            
+        page_text = self.page.locator("body").inner_text()
+        current_url = self.page.url
+        # 滑块验证检测与提示
+        if "/web/user/safe/verify-slider" in current_url:
+            self.add_notification("检测到滑块验证页面，请在浏览器中完成验证...", "warning")
+            # 等待验证通过或超时（最多5分钟）
+            start = time.time()
+            while time.time() - start < 300:
+                self.page.wait_for_timeout(1000)
+                current_url = self.page.url
+                if "/web/user/safe/verify-slider" not in current_url:
+                    break
+            
+            # 检查是否在登录页面
+            if ("登录" in page_text and ("立即登录" in page_text or "登录/注册" in page_text)) or "login" in current_url.lower():
+                self.add_notification("检测到需要登录", "warning")
                 return False
-                
-        except Exception as e:
-            self.add_notification(f"检查登录状态失败: {e}", "error")
+            
+            # 检查是否有聊天相关元素
+            if any(keyword in page_text for keyword in ["消息", "沟通", "聊天", "候选人", "简历"]):
+                self.add_notification("登录状态正常", "success")
+                return True
+            
+            self.add_notification("登录状态不明确", "warning")
             return False
     
     
@@ -731,19 +563,13 @@ class BossService:
         """Gracefully shut down Playwright resources."""
         self.add_notification("执行优雅关闭...", "info")
         # For external CDP-attached browser, do not close the shared context; just detach listeners.
-        try:
-            if hasattr(self, 'context') and self.context:
-                # Best effort: remove response listeners if needed
-                pass
-        except Exception as e:
-            self.add_notification(f"清理CDP监听时出错: {e}", "warning")
+        if hasattr(self, 'context') and self.context:
+            # Best effort: remove response listeners if needed
+            pass
         
         if self.playwright:
-            try:
-                self.playwright.stop()
-                self.add_notification("Playwright已停止。", "success")
-            except Exception as e:
-                self.add_notification(f"停止Playwright时出错: {e}", "warning")
+            self.playwright.stop()
+            self.add_notification("Playwright已停止。", "success")
         
         self.context = None
         self.page = None
@@ -761,133 +587,100 @@ class BossService:
 
         # Page present?
         if not self.page or self.page.is_closed():
-            try:
-                pages = list(self.context.pages)
-                # First, try to find a page that already has CHAT_URL
-                for page in pages:
-                    if settings.CHAT_URL in getattr(page, 'url', ''):
-                        self.page = page
-                        break
-                else:
-                    # If no page with CHAT_URL found, use first available page or create new one
-                    self.page = pages[0] if pages else self.context.new_page()
-                    if settings.CHAT_URL not in getattr(self.page, 'url', ''):
-                        try:
-                            self.page.goto(settings.CHAT_URL, wait_until="domcontentloaded", timeout=10000)
-                            try:
-                                self.page.wait_for_load_state("networkidle", timeout=5000)
-                            except Exception:
-                                pass
-                        except Exception:
-                            pass
-            except Exception:
-                self.start_browser()
-                return
+            pages = list(self.context.pages)
+            # First, try to find a page that already has CHAT_URL
+            for page in pages:
+                if settings.CHAT_URL in getattr(page, 'url', ''):
+                    self.page = page
+                    break
+            else:
+                # If no page with CHAT_URL found, use first available page or create new one
+                self.page = pages[0] if pages else self.context.new_page()
+                if settings.CHAT_URL not in getattr(self.page, 'url', ''):
+                    self.page.goto(settings.CHAT_URL, wait_until="domcontentloaded", timeout=10000)
+                    self.page.wait_for_load_state("networkidle", timeout=5000)
 
         # Lightweight liveness check
-        try:
-            _ = self.page.title()
-        except Exception as title_error:
-            self.add_notification(f"页面标题检查失败: {title_error}，将重新启动。", "warning")
-            self.start_browser()
-            return
+        _ = self.page.title()
 
         # Login verification - merged from ensure_login
         if not self.is_logged_in:
             self.add_notification("正在检查登录状态...", "info")
             
-            try:
-                # If the current page is on chat URL, check login status
-                if settings.BASE_URL in self.page.url and "加载中" not in self.page.content():
+            # If the current page is on chat URL, check login status
+            if settings.BASE_URL in self.page.url and "加载中" not in self.page.content():
+                page_text = self.page.locator("body").inner_text()
+                # More comprehensive login detection
+                login_indicators = ["消息", "聊天", "对话", "沟通", "候选人", "简历", "打招呼"]
+                if any(indicator in page_text for indicator in login_indicators):
+                    self.is_logged_in = True
+                    self.save_login_state()
+                    self.add_notification("已在聊天页面，登录状态确认。", "success")
+                    return
+                
+                # Also check for the presence of conversation list elements
+                conversation_elements = self.page.locator("xpath=//li[contains(@class, 'conversation') or contains(@class, 'chat') or contains(@class, 'item')]")
+                if conversation_elements.count() > 0:
+                    self.is_logged_in = True
+                    self.save_login_state()
+                    self.add_notification("检测到对话列表，登录状态确认。", "success")
+                    return
+            
+            # Wait for page to load and check if we were redirected to login page
+            self.page.wait_for_load_state("networkidle", timeout=5000)
+            current_url = self.page.url
+            
+            # Check if we were redirected to login page
+            if settings.LOGIN_URL in current_url or "web/user" in current_url or "login" in current_url.lower() or "bticket" in current_url:
+                self.add_notification("检测到登录页面，请手动完成登录...", "warning")
+                self.add_notification("等待用户登录，最多等待10分钟...", "info")
+                
+                # Wait for user to complete login with countdown display
+                start_time = time.time()
+                while time.time() - start_time < max_wait_time:
+                    current_url = self.page.url
                     page_text = self.page.locator("body").inner_text()
-                    # More comprehensive login detection
-                    login_indicators = ["消息", "聊天", "对话", "沟通", "候选人", "简历", "打招呼"]
-                    if any(indicator in page_text for indicator in login_indicators):
-                        self.is_logged_in = True
-                        self.save_login_state()
-                        self.add_notification("已在聊天页面，登录状态确认。", "success")
-                        return
                     
-                    # Also check for the presence of conversation list elements
-                    try:
-                        conversation_elements = self.page.locator("xpath=//li[contains(@class, 'conversation') or contains(@class, 'chat') or contains(@class, 'item')]")
-                        if conversation_elements.count() > 0:
-                            self.is_logged_in = True
-                            self.save_login_state()
-                            self.add_notification("检测到对话列表，登录状态确认。", "success")
-                            return
-                    except Exception:
-                        pass
+                    # Check if user has logged in
+                    if (settings.CHAT_URL in current_url or 
+                        any(keyword in page_text for keyword in ["消息", "沟通", "聊天", "候选人", "简历"])):
+                        self.add_notification("检测到用户已登录！", "success")
+                        break
+                    
+                    # Check if still on login page
+                    if "登录" in page_text and ("立即登录" in page_text or "登录/注册" in page_text):
+                        self.add_notification("请在浏览器中完成登录...", "info")
+                    
+                    # Display countdown
+                    elapsed = time.time() - start_time
+                    remaining = max_wait_time - elapsed
+                    minutes = int(remaining // 60)
+                    seconds = int(remaining % 60)
+                    print(f"\r⏰ 等待登录中... 剩余时间: {minutes:02d}:{seconds:02d}", end="", flush=True)
+                    
+                    time.sleep(3)
                 
-                # Wait for page to load and check if we were redirected to login page
-                try:
-                    self.page.wait_for_load_state("networkidle", timeout=5000)
-                except Exception:
-                    pass
-                current_url = self.page.url
+                # Clear the countdown line
+                print("\r" + " " * 50 + "\r", end="", flush=True)
                 
-                # Check if we were redirected to login page
-                if settings.LOGIN_URL in current_url or "web/user" in current_url or "login" in current_url.lower() or "bticket" in current_url:
-                    self.add_notification("检测到登录页面，请手动完成登录...", "warning")
-                    self.add_notification("等待用户登录，最多等待10分钟...", "info")
-                    
-                    # Wait for user to complete login with countdown display
-                    start_time = time.time()
-                    while time.time() - start_time < max_wait_time:
-                        try:
-                            current_url = self.page.url
-                            page_text = self.page.locator("body").inner_text()
-                            
-                            # Check if user has logged in
-                            if (settings.CHAT_URL in current_url or 
-                                any(keyword in page_text for keyword in ["消息", "沟通", "聊天", "候选人", "简历"])):
-                                self.add_notification("检测到用户已登录！", "success")
-                                break
-                            
-                            # Check if still on login page
-                            if "登录" in page_text and ("立即登录" in page_text or "登录/注册" in page_text):
-                                self.add_notification("请在浏览器中完成登录...", "info")
-                            
-                            # Display countdown
-                            elapsed = time.time() - start_time
-                            remaining = max_wait_time - elapsed
-                            minutes = int(remaining // 60)
-                            seconds = int(remaining % 60)
-                            print(f"\r⏰ 等待登录中... 剩余时间: {minutes:02d}:{seconds:02d}", end="", flush=True)
-                            
-                        except Exception as e:
-                            self.add_notification(f"检查登录状态时出错: {e}", "warning")
-                        
-                        time.sleep(3)
-                    
-                    # Clear the countdown line
-                    print("\r" + " " * 50 + "\r", end="", flush=True)
-                    
-                    if not self.is_logged_in:
-                        raise Exception("等待登录超时，请手动登录后重试")
-                else:
-                    # If we reached the chat page directly, wait for it to load
-                    self.add_notification("等待聊天页面加载...", "info")
-                    self.page.wait_for_url(
-                        settings.BASE_URL,
-                        timeout=6000, # 10 minutes
-                    )
-                
-                # Final verification after navigation/login
-                self.page.wait_for_function(
-                    "() => !document.body.innerText.includes('加载中，请稍候')",
-                    timeout=30000
+                if not self.is_logged_in:
+                    raise Exception("等待登录超时，请手动登录后重试")
+            else:
+                # If we reached the chat page directly, wait for it to load
+                self.add_notification("等待聊天页面加载...", "info")
+                self.page.wait_for_url(
+                    settings.BASE_URL,
+                    timeout=6000, # 10 minutes
                 )
-                self.is_logged_in = True
-                self.save_login_state()
-                self.add_notification("登录成功并已在聊天页面。", "success")
-
-            except Exception as e:
-                self.is_logged_in = False
-                self.add_notification(f"登录检查或等待超时失败: {e}", "error")
-                import traceback
-                self.add_notification(traceback.format_exc(), "error")
-                raise Exception("登录失败")
+            
+            # Final verification after navigation/login
+            self.page.wait_for_function(
+                "() => !document.body.innerText.includes('加载中，请稍候')",
+                timeout=30000
+            )
+            self.is_logged_in = True
+            self.save_login_state()
+            self.add_notification("登录成功并已在聊天页面。", "success")
 
 
     
