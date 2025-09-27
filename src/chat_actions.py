@@ -31,18 +31,21 @@ def _prepare_chat_page(page, chat_id: str = None, *, wait_timeout: int = 5000) -
         return None, None
     direct_selectors = [
         f"div.geek-item[data-id=\"{chat_id}\"]",
-        f"div[role='listitem'][key=\"{chat_id}\"]",
+        # f"div[role='listitem'][key=\"{chat_id}\"]",
     ]
     for selector in direct_selectors:
         locator = page.locator(selector)
         if locator.count():
             target = locator.first
 
+    # move to chat target
     if target:
         target.scroll_into_view_if_needed(timeout=1000)
-    # move to chat target
     if target is None:
         return None, { 'success': False, 'details': '未找到指定对话项' }
+    # 如果已经选中，直接返回
+    if 'selected' in target.get_attribute('class'):
+        return target, None
     # click chat target
     target.click()
 
@@ -75,7 +78,7 @@ def request_resume_action(page, chat_id: str, *, logger=lambda msg, level: None)
     btn0 = page.locator('button:has-text("继续交换")')
     if btn0.count():
         btn0.click()
-    confirm = page.locator("span:has-text('确定'), button:has-text('确定'), a:has-text('确定')").first
+    confirm = page.locator("span.boss-btn-primary:has-text('确定')").first
     confirm.click()
 
     # Verify
